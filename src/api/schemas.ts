@@ -39,11 +39,26 @@ const ErrorResponse = <C extends string>(code: C) => Schema.Struct({
   error: Schema.Struct({code: Schema.Literal(code), message: Schema.String}),
 });
 
-export const BadRequestResponse = ErrorResponse('INVALID_LIMIT').pipe(HttpApiSchema.status(400));
+export const ValidationErrorResponse = Schema.Struct({
+  success: Schema.Literal(false),
+  error: Schema.Struct({
+    code: Schema.Literal('VALIDATION_ERROR'),
+    message: Schema.String,
+    fields: Schema.Record(Schema.String, Schema.Array(Schema.String)),
+  }),
+}).pipe(HttpApiSchema.status(400));
 export const UnauthorizedResponse = ErrorResponse('UNAUTHORIZED').pipe(HttpApiSchema.status(401));
 export const InternalErrorResponse = ErrorResponse('DATABASE_ERROR').pipe(HttpApiSchema.status(500));
 
 export const errorResponse = <C extends string>(code: C, message: string) => ({
   success: false as const,
   error: {code, message},
+});
+
+export const validationErrorResponse = (
+  message: string,
+  fields: Record<string, ReadonlyArray<string>>,
+) => ({
+  success: false as const,
+  error: {code: 'VALIDATION_ERROR' as const, message, fields},
 });

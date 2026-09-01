@@ -133,6 +133,27 @@ Do not use `endpoint.success` to construct the result. It is a runtime
 `ReadonlySet` because an endpoint may declare multiple response
 representations, so it does not expose one typed `.make()` method.
 
+Request validation belongs in endpoint schemas rather than handlers. The
+global `RequestSchemaError` middleware transforms Effect decoding failures for
+query, payload, path, and header inputs into the standard response envelope:
+
+```json
+{
+  "success": false,
+  "error": {
+    "code": "VALIDATION_ERROR",
+    "message": "Query validation failed",
+    "fields": {
+      "limit": ["Expected an integer"]
+    }
+  }
+}
+```
+
+Handlers therefore receive already decoded values and only handle domain or
+database failures. Response-encoding schema failures remain server defects and
+are not mislabeled as invalid client input.
+
 Errors include a stable machine-readable code:
 
 ```json

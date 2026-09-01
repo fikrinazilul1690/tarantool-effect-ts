@@ -4,12 +4,14 @@ import {HttpEffect, HttpRouter} from 'effect/unstable/http';
 import {HttpApiBuilder} from 'effect/unstable/httpapi';
 import {Api} from './api/api';
 import {SystemHandlers, UsersHandlers} from './api/handlers';
+import {RequestSchemaErrorLive} from './api/schema-error-middleware';
 import {BetterAuth, BetterAuthLive} from './auth/auth';
 import {TarantoolDbLive} from './db';
 import {EmailLive} from './email';
 
 const ApiRoutes = HttpApiBuilder.layer(Api, {openapiPath: '/openapi.json'}).pipe(
   Layer.provide([SystemHandlers, UsersHandlers]),
+  Layer.provide(RequestSchemaErrorLive),
 );
 
 // Better Auth owns its public protocol, while application endpoints are

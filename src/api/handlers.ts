@@ -24,14 +24,6 @@ const UsersHandlersNoDeps = HttpApiBuilder.group(
     const db = yield* TarantoolDb;
     return handlers.handle("listUsers", ({ query }) => {
       const limit = query.limit ?? 20;
-      if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
-        return Effect.fail(
-          errorResponse(
-            "INVALID_LIMIT",
-            "limit must be an integer between 1 and 100",
-          ),
-        );
-      }
       return db
         .call<CursorPage<User>>("api.users_page", query.cursor ?? null, limit)
         .pipe(
