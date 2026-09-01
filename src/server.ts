@@ -6,6 +6,7 @@ import {Api} from './api/api';
 import {SystemHandlers, UsersHandlers} from './api/handlers';
 import {BetterAuth, BetterAuthLive} from './auth/auth';
 import {TarantoolDbLive} from './db';
+import {EmailLive} from './email';
 
 const ApiRoutes = HttpApiBuilder.layer(Api, {openapiPath: '/openapi.json'}).pipe(
   Layer.provide([SystemHandlers, UsersHandlers]),
@@ -26,6 +27,7 @@ const Routes = Layer.mergeAll(ApiRoutes, BetterAuthRoutes);
 const HttpLive = HttpRouter.serve(Routes).pipe(
   Layer.provide(BunHttpServer.layer({port: Number(process.env.PORT ?? 3000)})),
   Layer.provide(BetterAuthLive),
+  Layer.provide(EmailLive),
   Layer.provide(TarantoolDbLive),
 );
 

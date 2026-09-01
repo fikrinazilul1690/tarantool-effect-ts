@@ -1,4 +1,4 @@
-import {Schema} from 'effect';
+import {Effect, Schema} from 'effect';
 import {HttpApiSchema} from 'effect/unstable/httpapi';
 
 export const UserSchema = Schema.Struct({
@@ -14,12 +14,25 @@ export const CursorPageSchema = Schema.Struct({
   items: Schema.Array(UserSchema),
   next_cursor: Schema.NullOr(Schema.String),
   has_more: Schema.Boolean,
+  totalPage: Schema.Number,
+  currentPage: Schema.Number,
+  lastCursor: Schema.NullOr(Schema.String),
 });
 
 export const SuccessResponse = <S extends Schema.Top>(data: S) => Schema.Struct({
-  success: Schema.Literal(true),
+  success: Schema.Literal(true).pipe(
+    Schema.optionalKey,
+    Schema.withConstructorDefault(Effect.succeed(true as const)),
+  ),
   data,
 });
+
+export const HealthSuccess = SuccessResponse(Schema.Struct({
+  status: Schema.Literal('ok'),
+  runtime: Schema.String,
+}));
+
+export const ListUsersSuccess = SuccessResponse(CursorPageSchema);
 
 const ErrorResponse = <C extends string>(code: C) => Schema.Struct({
   success: Schema.Literal(false),

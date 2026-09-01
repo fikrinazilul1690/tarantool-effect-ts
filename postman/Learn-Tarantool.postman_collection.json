@@ -9,8 +9,11 @@
     {"key": "baseUrl", "value": "http://localhost:3000", "type": "string"},
     {"key": "pageLimit", "value": "2", "type": "string"},
     {"key": "nextCursor", "value": "", "type": "string"},
+    {"key": "lastCursor", "value": "", "type": "string"},
     {"key": "authEmail", "value": "", "type": "string"},
     {"key": "authPassword", "value": "secure-password-123", "type": "string"},
+    {"key": "verificationToken", "value": "paste-token-from-email", "type": "string"},
+    {"key": "verificationCallbackUrl", "value": "http://localhost:3000/health", "type": "string"},
     {"key": "userId", "value": "", "type": "string"},
     {"key": "sessionToken", "value": "", "type": "string"}
   ],
@@ -67,7 +70,9 @@
             "pm.test('status is 200', () => pm.response.to.have.status(200));",
             "const page = pm.response.json().data;",
             "pm.test('response contains complete user objects', () => { pm.expect(page.items).to.be.an('array'); if (page.items.length > 0) pm.expect(page.items[0]).to.include.keys('id', 'email', 'name', 'age'); });",
-            "pm.collectionVariables.set('nextCursor', page.next_cursor || '');"
+            "pm.test('pagination metadata is present', () => pm.expect(page).to.include.keys('totalPage', 'currentPage', 'lastCursor'));",
+            "pm.collectionVariables.set('nextCursor', page.next_cursor || '');",
+            "pm.collectionVariables.set('lastCursor', page.lastCursor || '');"
           ]}}]
         },
         {
@@ -90,7 +95,8 @@
           "event": [{"listen": "test", "script": {"exec": [
             "pm.test('status is 200', () => pm.response.to.have.status(200));",
             "const page = pm.response.json().data;",
-            "pm.collectionVariables.set('nextCursor', page.next_cursor || '');"
+            "pm.collectionVariables.set('nextCursor', page.next_cursor || '');",
+            "pm.collectionVariables.set('lastCursor', page.lastCursor || '');"
           ]}}]
         }
       ]
@@ -109,16 +115,46 @@
             ]}},
             {"listen": "test", "script": {"exec": [
               "pm.test('status is 200', () => pm.response.to.have.status(200));",
-              "const result = pm.response.json();",
+              "const result = pm.response.json().data;",
               "pm.collectionVariables.set('userId', result.user.id);",
-              "pm.collectionVariables.set('sessionToken', result.token);"
+              "pm.test('user awaits verification', () => { pm.expect(result.token).to.eql(null); pm.expect(result.user.emailVerified).to.eql(false); });"
             ]}}
           ],
           "request": {
             "method": "POST",
             "header": [{"key": "Content-Type", "value": "application/json"}],
-            "body": {"mode": "raw", "raw": "{\n  \"name\": \"Postman Learner\",\n  \"email\": \"{{authEmail}}\",\n  \"password\": \"{{authPassword}}\"\n}", "options": {"raw": {"language": "json"}}},
+            "body": {"mode": "raw", "raw": "{\n  \"name\": \"Postman Learner\",\n  \"email\": \"{{authEmail}}\",\n  \"password\": \"{{authPassword}}\",\n  \"callbackURL\": \"{{verificationCallbackUrl}}\"\n}", "options": {"raw": {"language": "json"}}},
             "url": {"raw": "{{baseUrl}}/api/auth/sign-up/email", "host": ["{{baseUrl}}"], "path": ["api", "auth", "sign-up", "email"]}
+          }
+        },
+        {
+          "name": "Resend Verification Email",
+          "request": {
+            "method": "POST",
+            "header": [{"key": "Content-Type", "value": "application/json"}],
+            "body": {"mode": "raw", "raw": "{\n  \"email\": \"{{authEmail}}\",\n  \"callbackURL\": \"{{verificationCallbackUrl}}\"\n}", "options": {"raw": {"language": "json"}}},
+            "url": {"raw": "{{baseUrl}}/api/auth/send-verification-email", "host": ["{{baseUrl}}"], "path": ["api", "auth", "send-verification-email"]},
+            "description": "Sends another real verification email through the configured SMTP provider."
+          },
+          "event": [{"listen": "test", "script": {"exec": [
+            "pm.test('status is 200', () => pm.response.to.have.status(200));"
+          ]}}]
+        },
+        {
+          "name": "Verify Email with Token",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/auth/verify-email?token={{verificationToken}}&callbackURL={{verificationCallbackUrl}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "auth", "verify-email"],
+              "query": [
+                {"key": "token", "value": "{{verificationToken}}"},
+                {"key": "callbackURL", "value": "{{verificationCallbackUrl}}"}
+              ]
+            },
+            "description": "Normally the recipient clicks the email link. For manual testing, copy only its token query value into verificationToken."
           }
         },
         {
@@ -131,7 +167,7 @@
           },
           "event": [{"listen": "test", "script": {"exec": [
             "pm.test('status is 200', () => pm.response.to.have.status(200));",
-            "const result = pm.response.json();",
+            "const result = pm.response.json().data;",
             "pm.collectionVariables.set('userId', result.user.id);",
             "pm.collectionVariables.set('sessionToken', result.token);"
           ]}}]
@@ -146,7 +182,7 @@
           },
           "event": [{"listen": "test", "script": {"exec": [
             "pm.test('status is 200', () => pm.response.to.have.status(200));",
-            "pm.test('session belongs to saved user', () => pm.expect(pm.response.json().user.id).to.eql(pm.collectionVariables.get('userId')));"
+            "pm.test('session belongs to saved user', () => pm.expect(pm.response.json().data.user.id).to.eql(pm.collectionVariables.get('userId')));"
           ]}}]
         },
         {

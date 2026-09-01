@@ -25,4 +25,7 @@ export interface CursorPage<T> {
   items: T[];
   next_cursor: string | null;
   has_more: boolean;
+  totalPage: number;
+  currentPage: number;
+  lastCursor: string | null;
 }

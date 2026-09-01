@@ -31,11 +31,35 @@ test('fetch_pos pagination traverses all shards without duplicates', () => runDb
 
   let cursor: string | null = null;
   const seenIds: number[] = [];
+  let expectedPage = 1;
+  let lastCursor: string | null = null;
+  let totalPage = 0;
   do {
     const page: CursorPage<User> = yield* db.call<CursorPage<User>>('api.users_page', cursor, 17);
+    expect(page.currentPage).toBe(expectedPage);
+    expect(page.totalPage).toBeGreaterThanOrEqual(page.currentPage);
+    if (expectedPage === 1) {
+      lastCursor = page.lastCursor;
+      totalPage = page.totalPage;
+    }
+    if (page.lastCursor !== null) {
+      expect(page.lastCursor).toMatch(/^p:\d+\|rs:[0-9a-f-]+\|[A-Za-z0-9_-]*$/);
+    }
     seenIds.push(...page.items.map(({id}) => id));
     cursor = page.next_cursor;
+    if (cursor !== null) {
+      expect(cursor).toMatch(/^p:\d+\|rs:[0-9a-f-]+\|[A-Za-z0-9_-]*$/);
+      expect(cursor).not.toMatch(/[+/=\s]/);
+    }
+    expectedPage += 1;
   } while (cursor !== null);
+
+  if (lastCursor !== null) {
+    const lastPage = yield* db.call<CursorPage<User>>('api.users_page', lastCursor, 17);
+    expect(lastPage.currentPage).toBe(totalPage);
+    expect(lastPage.next_cursor).toBeNull();
+    expect(lastPage.has_more).toBeFalse();
+  }
 
   expect(new Set(seenIds).size).toBe(seenIds.length);
   for (const id of expectedIds) expect(seenIds).toContain(id);

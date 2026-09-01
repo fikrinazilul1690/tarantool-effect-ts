@@ -3,19 +3,14 @@ import {HttpApi, HttpApiEndpoint, HttpApiGroup, OpenApi} from 'effect/unstable/h
 import {ApiAuthorization} from './auth-middleware';
 import {
   BadRequestResponse,
-  CursorPageSchema,
+  HealthSuccess,
   InternalErrorResponse,
-  SuccessResponse,
+  ListUsersSuccess,
 } from './schemas';
-
-const HealthData = Schema.Struct({
-  status: Schema.Literal('ok'),
-  runtime: Schema.String,
-});
 
 export class SystemApi extends HttpApiGroup.make('system', {topLevel: true}).add(
   HttpApiEndpoint.get('health', '/health', {
-    success: SuccessResponse(HealthData),
+    success: HealthSuccess,
   }),
 ) {}
 
@@ -25,7 +20,7 @@ export class UsersApi extends HttpApiGroup.make('users').add(
       limit: Schema.optional(Schema.NumberFromString),
       cursor: Schema.optional(Schema.String),
     },
-    success: SuccessResponse(CursorPageSchema),
+    success: ListUsersSuccess,
     error: [BadRequestResponse, InternalErrorResponse],
   }),
 ).middleware(ApiAuthorization) {}

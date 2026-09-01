@@ -167,6 +167,10 @@ function storage_api.count(bucket_id)
     return box.space.users.index.bucket_id:count({bucket_id})
 end
 
+function storage_api.users_total()
+    return box.space.users:len()
+end
+
 local function compare(actual, condition)
     local expected = condition.value
     local operator = condition.operator or 'eq'
@@ -263,6 +267,7 @@ box.schema.func.create('storage_api.user_update', {if_not_exists = true})
 box.schema.func.create('storage_api.user_delete', {if_not_exists = true})
 box.schema.func.create('storage_api.users_by_age', {if_not_exists = true})
 box.schema.func.create('storage_api.users_fetch_page', {if_not_exists = true})
+box.schema.func.create('storage_api.users_total', {if_not_exists = true})
 box.schema.func.create('storage_api.transfer_age', {if_not_exists = true})
 box.schema.func.create('storage_api.count', {if_not_exists = true})
 box.schema.func.create('storage_api.auth_create', {if_not_exists = true})

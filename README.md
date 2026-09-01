@@ -119,15 +119,35 @@ Public Effect API responses use a consistent envelope:
 {"success": true, "data": {}}
 ```
 
+Export the endpoint's success schema and reuse that exact value in its handler.
+`Schema.make` applies the constructor default for `success`, while
+`HttpApiBuilder` still checks the returned type:
+
+```ts
+return db.call<CursorPage<User>>('api.users_page', cursor, limit).pipe(
+  Effect.map((page) => ListUsersSuccess.make({data: page})),
+);
+```
+
+Do not use `endpoint.success` to construct the result. It is a runtime
+`ReadonlySet` because an endpoint may declare multiple response
+representations, so it does not expose one typed `.make()` method.
+
 Errors include a stable machine-readable code:
 
 ```json
 {"success": false, "error": {"code": "UNAUTHORIZED", "message": "..."}}
 ```
 
-The Better Auth bearer plugin exposes `set-auth-token` on sign-up and sign-in.
-Use either that signed value or the returned JSON `token` to access protected
-application endpoints:
+JSON responses from `/api/auth/*` use the same envelope. Better Auth redirects,
+empty responses, cookies, and headers such as `set-auth-token` pass through
+unchanged. The server-side `auth.api` interface also remains native so the
+authorization middleware can validate sessions without encoding and decoding
+HTTP envelopes.
+
+The Better Auth bearer plugin exposes `set-auth-token` after verification and
+sign-in. Use either that signed value or the sign-in JSON `token` to access
+protected application endpoints:
 
 ```bash
 curl -H 'Authorization: Bearer YOUR_TOKEN' \
@@ -142,15 +162,32 @@ environment:
 - `postman/Learn-Tarantool.postman_collection.json`
 - `postman/Local.postman_environment.json`
 
-The collection contains health, OpenAPI, first/next user page, sign-up, sign-in,
-current-session, and sign-out requests. Run **List Users - First Page** before
+The collection contains health, OpenAPI, pagination, email verification, and
+session requests. Run **List Users - First Page** before
 **List Users - Next Page** so its test script saves `next_cursor`. First run
-**Sign Up with Email** or **Sign In with Email** to save `sessionToken`; user
-requests send it as a bearer token. Postman's cookie jar also retains the
-Better Auth session cookie. Clear the collection's `authEmail` variable to
-generate a new unique account on the next sign-up.
+**Sign In with Email** after verifying the account to save `sessionToken`; user
+requests send it as a bearer token. Clear the collection's `authEmail` variable
+to generate a new unique account on the next sign-up.
 
-Create an account and retain the session cookie:
+### Real email verification
+
+Email/password accounts must verify their address before sign-in. Sign-up and
+unverified sign-in both send a one-hour verification link. With delivery
+disabled, the development server logs the link. For Gmail delivery:
+
+1. Enable 2-Step Verification on a Google account.
+2. Create an App Password; normal Google passwords are not accepted for SMTP.
+3. Copy `.env.example` to `.env` and set `EMAIL_DELIVERY_ENABLED=true`,
+   `SMTP_USER`, `SMTP_PASSWORD`, and `EMAIL_FROM`.
+4. Restart `make api`. Startup verifies the SMTP connection and fails if the
+   credentials or network settings are invalid.
+
+For another provider, change `SMTP_HOST`, `SMTP_PORT`, and `SMTP_SECURE`.
+Never commit `.env` or an App Password. A production service should enqueue
+email work instead of waiting for SMTP inside the authentication request.
+
+Create an account; Better Auth sends a verification email and returns no token
+until the recipient verifies it:
 
 ```bash
 curl -c /tmp/auth-cookies.txt \
@@ -158,7 +195,7 @@ curl -c /tmp/auth-cookies.txt \
   -d '{"name":"Ada","email":"ada@example.com","password":"secure-password-123"}' \
   http://localhost:3000/api/auth/sign-up/email
 
-curl -b /tmp/auth-cookies.txt http://localhost:3000/api/auth/get-session
+# Click the received link, then sign in with POST /api/auth/sign-in/email.
 ```
 
 Sign in later with `POST /api/auth/sign-in/email` using the same `email` and
@@ -231,6 +268,11 @@ visited in stable UUID order, and users within each shard are in ascending ID
 order. The first cursor is `null`; pass `next_cursor` unchanged to the next
 request. Limits must be between 1 and 100.
 
+The router converts Tarantool's standard Base64 `fetch_pos` into Base64URL
+before returning it. This prevents `+` from becoming a space when the cursor is
+used as a query parameter. Clients should still URL-encode the opaque cursor
+and must never parse or modify it.
+
 ```ts
 const first = yield* db.call<CursorPage<User>>('api.users_page', null, 25);
 const next = first.next_cursor === null
@@ -247,8 +289,18 @@ Response shape:
   items: User[];
   next_cursor: string | null; // opaque: do not parse or modify it
   has_more: boolean;
+  totalPage: number;
+  currentPage: number;
+  lastCursor: string | null; // opens the final page directly
 }
 ```
+
+`totalPage` is based on a cluster-wide count and the requested limit.
+`currentPage` is carried inside newly issued opaque cursors. `lastCursor` is
+`null` when the first page is also the final page; otherwise pass it as the
+normal `cursor` parameter to open the final page. Calculating totals and the
+final cursor fans out across the cluster and traverses index positions, so a
+large production dataset should cache this metadata or omit it.
 
 This uses Tarantool's native TREE-index pagination. Each storage calls
 `index:select({}, {after = position, fetch_pos = true})`; `fetch_pos` produces

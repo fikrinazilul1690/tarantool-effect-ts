@@ -69,31 +69,42 @@ local function sorted_replicasets()
 end
 
 local function decode_cursor(cursor, replicasets)
-    if cursor == nil or cursor == box.NULL or cursor == '' then return 1, nil end
+    if cursor == nil or cursor == box.NULL or cursor == '' then return 1, nil, 1 end
     if type(cursor) ~= 'string' then error('invalid cursor') end
-    local uuid, position = string.match(cursor, '^rs:([^|]+)|(.*)$')
+    local page_number, uuid, position = string.match(cursor, '^p:(%d+)|rs:([^|]+)|(.*)$')
+    if uuid == nil then
+        -- Cursors issued before page metadata was added remain readable.
+        uuid, position = string.match(cursor, '^rs:([^|]+)|(.*)$')
+        page_number = 1
+    end
     if uuid == nil then error('invalid cursor') end
+    -- fetch_pos returns standard base64, whose '+' is decoded as a space in
+    -- query strings. Accept those legacy cursors, then decode our base64url
+    -- representation back to the exact storage position.
+    position = string.gsub(position, ' ', '+')
+    position = string.gsub(position, '-', '+')
+    position = string.gsub(position, '_', '/')
+    local remainder = #position % 4
+    if remainder > 0 then position = position .. string.rep('=', 4 - remainder) end
     for index, entry in ipairs(replicasets) do
         if entry.uuid == uuid then
             if position == '' then position = nil end
-            return index, position
+            return index, position, tonumber(page_number)
         end
     end
     error('cursor references a replica set that is not in the topology')
 end
 
-local function encode_cursor(entry, position)
-    return 'rs:' .. entry.uuid .. '|' .. (position or '')
+local function encode_cursor(entry, position, page_number)
+    local safe_position = position or ''
+    safe_position = string.gsub(safe_position, '%+', '-')
+    safe_position = string.gsub(safe_position, '/', '_')
+    safe_position = string.gsub(safe_position, '=+$', '')
+    return 'p:' .. page_number .. '|rs:' .. entry.uuid .. '|' .. safe_position
 end
 
-function api.users_page(cursor, requested_limit)
-    local limit = requested_limit or 20
-    if type(limit) ~= 'number' or limit % 1 ~= 0 or limit < 1 or limit > 100 then
-        error('limit must be an integer between 1 and 100')
-    end
-
-    local replicasets = sorted_replicasets()
-    local shard_index, position = decode_cursor(cursor, replicasets)
+local function users_page_core(cursor, limit, replicasets)
+    local shard_index, position, current_page = decode_cursor(cursor, replicasets)
     local items = {}
     local current_has_more = false
 
@@ -115,13 +126,51 @@ function api.users_page(cursor, requested_limit)
 
     local next_cursor = box.NULL
     if #items == limit and shard_index <= #replicasets then
-        next_cursor = encode_cursor(replicasets[shard_index], position)
+        next_cursor = encode_cursor(replicasets[shard_index], position, current_page + 1)
     end
     return {
         items = items,
         next_cursor = next_cursor,
         has_more = next_cursor ~= box.NULL,
+        currentPage = current_page,
     }
+end
+
+local function users_total(replicasets)
+    local total = 0
+    for _, entry in ipairs(replicasets) do
+        local count, err = entry.replicaset:callro('storage_api.users_total', {})
+        if count == nil then error(tostring(err)) end
+        total = total + count
+    end
+    return total
+end
+
+function api.users_page(cursor, requested_limit)
+    local limit = requested_limit or 20
+    if type(limit) ~= 'number' or limit % 1 ~= 0 or limit < 1 or limit > 100 then
+        error('limit must be an integer between 1 and 100')
+    end
+
+    local replicasets = sorted_replicasets()
+    local result = users_page_core(cursor, limit, replicasets)
+    local total = users_total(replicasets)
+    local total_pages = math.ceil(total / limit)
+    local last_cursor = box.NULL
+
+    if total_pages > 1 then
+        local probe_cursor = box.NULL
+        for _ = 1, total_pages - 1 do
+            local probe = users_page_core(probe_cursor, limit, replicasets)
+            probe_cursor = probe.next_cursor
+            if probe_cursor == box.NULL then break end
+        end
+        last_cursor = probe_cursor
+    end
+
+    result.totalPage = total_pages
+    result.lastCursor = last_cursor
+    return result
 end
 
 function api.transfer_age(first_id, second_id, amount)
