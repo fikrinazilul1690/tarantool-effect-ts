@@ -1,0 +1,171 @@
+{
+  "info": {
+    "_postman_id": "e88061f7-b365-4a15-90ce-a2cdfce90ca0",
+    "name": "Learn Tarantool - Effect API",
+    "description": "Requests for the Effect v4 HTTP API and Better Auth. Run the Auth folder in order so Postman can retain the Better Auth session cookie.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {"key": "baseUrl", "value": "http://localhost:3000", "type": "string"},
+    {"key": "pageLimit", "value": "2", "type": "string"},
+    {"key": "nextCursor", "value": "", "type": "string"},
+    {"key": "authEmail", "value": "", "type": "string"},
+    {"key": "authPassword", "value": "secure-password-123", "type": "string"},
+    {"key": "userId", "value": "", "type": "string"},
+    {"key": "sessionToken", "value": "", "type": "string"}
+  ],
+  "item": [
+    {
+      "name": "System",
+      "item": [
+        {
+          "name": "Health Check",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {"raw": "{{baseUrl}}/health", "host": ["{{baseUrl}}"], "path": ["health"]},
+            "description": "Checks the Effect v4 BunPlatform HTTP server."
+          },
+          "event": [{"listen": "test", "script": {"exec": [
+            "pm.test('status is 200', () => pm.response.to.have.status(200));",
+            "pm.test('server reports healthy', () => pm.expect(pm.response.json().data.status).to.eql('ok'));"
+          ]}}]
+        },
+        {
+          "name": "OpenAPI Document",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {"raw": "{{baseUrl}}/openapi.json", "host": ["{{baseUrl}}"], "path": ["openapi.json"]},
+            "description": "Generated automatically from the Effect HttpApi schemas."
+          },
+          "event": [{"listen": "test", "script": {"exec": [
+            "pm.test('status is 200', () => pm.response.to.have.status(200));",
+            "pm.test('OpenAPI 3.1 document', () => pm.expect(pm.response.json().openapi).to.eql('3.1.0'));"
+          ]}}]
+        }
+      ]
+    },
+    {
+      "name": "Users",
+      "item": [
+        {
+          "name": "List Users - First Page",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "auth": {"type": "bearer", "bearer": [{"key": "token", "value": "{{sessionToken}}", "type": "string"}]},
+            "url": {
+              "raw": "{{baseUrl}}/api/users?limit={{pageLimit}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "users"],
+              "query": [{"key": "limit", "value": "{{pageLimit}}"}]
+            },
+            "description": "Starts cursor pagination. The test saves next_cursor as nextCursor."
+          },
+          "event": [{"listen": "test", "script": {"exec": [
+            "pm.test('status is 200', () => pm.response.to.have.status(200));",
+            "const page = pm.response.json().data;",
+            "pm.test('response contains complete user objects', () => { pm.expect(page.items).to.be.an('array'); if (page.items.length > 0) pm.expect(page.items[0]).to.include.keys('id', 'email', 'name', 'age'); });",
+            "pm.collectionVariables.set('nextCursor', page.next_cursor || '');"
+          ]}}]
+        },
+        {
+          "name": "List Users - Next Page",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "auth": {"type": "bearer", "bearer": [{"key": "token", "value": "{{sessionToken}}", "type": "string"}]},
+            "url": {
+              "raw": "{{baseUrl}}/api/users?limit={{pageLimit}}&cursor={{nextCursor}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "users"],
+              "query": [
+                {"key": "limit", "value": "{{pageLimit}}"},
+                {"key": "cursor", "value": "{{nextCursor}}"}
+              ]
+            },
+            "description": "Uses the opaque fetch_pos cursor saved by the first-page request."
+          },
+          "event": [{"listen": "test", "script": {"exec": [
+            "pm.test('status is 200', () => pm.response.to.have.status(200));",
+            "const page = pm.response.json().data;",
+            "pm.collectionVariables.set('nextCursor', page.next_cursor || '');"
+          ]}}]
+        }
+      ]
+    },
+    {
+      "name": "Auth",
+      "description": "Postman automatically stores the better-auth.session_token cookie returned by sign-up/sign-in.",
+      "item": [
+        {
+          "name": "Sign Up with Email",
+          "event": [
+            {"listen": "prerequest", "script": {"exec": [
+              "if (!pm.collectionVariables.get('authEmail')) {",
+              "  pm.collectionVariables.set('authEmail', `postman-${Date.now()}@example.com`);",
+              "}"
+            ]}},
+            {"listen": "test", "script": {"exec": [
+              "pm.test('status is 200', () => pm.response.to.have.status(200));",
+              "const result = pm.response.json();",
+              "pm.collectionVariables.set('userId', result.user.id);",
+              "pm.collectionVariables.set('sessionToken', result.token);"
+            ]}}
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{"key": "Content-Type", "value": "application/json"}],
+            "body": {"mode": "raw", "raw": "{\n  \"name\": \"Postman Learner\",\n  \"email\": \"{{authEmail}}\",\n  \"password\": \"{{authPassword}}\"\n}", "options": {"raw": {"language": "json"}}},
+            "url": {"raw": "{{baseUrl}}/api/auth/sign-up/email", "host": ["{{baseUrl}}"], "path": ["api", "auth", "sign-up", "email"]}
+          }
+        },
+        {
+          "name": "Sign In with Email",
+          "request": {
+            "method": "POST",
+            "header": [{"key": "Content-Type", "value": "application/json"}],
+            "body": {"mode": "raw", "raw": "{\n  \"email\": \"{{authEmail}}\",\n  \"password\": \"{{authPassword}}\"\n}", "options": {"raw": {"language": "json"}}},
+            "url": {"raw": "{{baseUrl}}/api/auth/sign-in/email", "host": ["{{baseUrl}}"], "path": ["api", "auth", "sign-in", "email"]}
+          },
+          "event": [{"listen": "test", "script": {"exec": [
+            "pm.test('status is 200', () => pm.response.to.have.status(200));",
+            "const result = pm.response.json();",
+            "pm.collectionVariables.set('userId', result.user.id);",
+            "pm.collectionVariables.set('sessionToken', result.token);"
+          ]}}]
+        },
+        {
+          "name": "Get Current Session",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {"raw": "{{baseUrl}}/api/auth/get-session", "host": ["{{baseUrl}}"], "path": ["api", "auth", "get-session"]},
+            "description": "Uses the session cookie retained by Postman's cookie jar."
+          },
+          "event": [{"listen": "test", "script": {"exec": [
+            "pm.test('status is 200', () => pm.response.to.have.status(200));",
+            "pm.test('session belongs to saved user', () => pm.expect(pm.response.json().user.id).to.eql(pm.collectionVariables.get('userId')));"
+          ]}}]
+        },
+        {
+          "name": "Sign Out",
+          "request": {
+            "method": "POST",
+            "header": [
+              {"key": "Content-Type", "value": "application/json"},
+              {"key": "Origin", "value": "{{baseUrl}}"}
+            ],
+            "body": {"mode": "raw", "raw": "{}", "options": {"raw": {"language": "json"}}},
+            "url": {"raw": "{{baseUrl}}/api/auth/sign-out", "host": ["{{baseUrl}}"], "path": ["api", "auth", "sign-out"]}
+          },
+          "event": [{"listen": "test", "script": {"exec": [
+            "pm.test('status is 200', () => pm.response.to.have.status(200));",
+            "pm.collectionVariables.set('sessionToken', '');"
+          ]}}]
+        }
+      ]
+    }
+  ]
+}

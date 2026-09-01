@@ -1,0 +1,31 @@
+{
+  "name": "learn-tarantool-vshard",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Hands-on Tarantool vshard cluster with Bun and TypeScript examples",
+  "type": "commonjs",
+  "main": "src/index.ts",
+  "scripts": {
+    "start": "bun run src/index.ts",
+    "server": "bun run src/server.ts",
+    "server:watch": "bun --watch src/server.ts",
+    "example:crud": "bun run examples/01-crud.ts",
+    "example:indexes": "bun run examples/02-indexes.ts",
+    "example:transactions": "bun run examples/03-transactions.ts",
+    "example:sharding": "bun run examples/04-sharding.ts",
+    "example:pagination": "bun run examples/05-cursor-pagination.ts",
+    "example:all": "bun run example:crud && bun run example:indexes && bun run example:transactions && bun run example:sharding && bun run example:pagination",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@effect/platform-bun": "^4.0.0-rc.112",
+    "better-auth": "^1.7.2",
+    "effect": "^4.0.0-rc.112",
+    "tarantool-driver": "^3.0.0"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5.9.0"
+  }
+}

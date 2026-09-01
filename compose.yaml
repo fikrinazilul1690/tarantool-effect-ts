@@ -1,0 +1,66 @@
+services:
+  tarantool-admin:
+    image: quay.io/basis-company/tarantool-admin:latest
+    restart: unless-stopped
+    ports:
+      - "8000:80"
+    depends_on:
+      router:
+        condition: service_healthy
+
+  storage-1:
+    build: .
+    command: ["tarantool", "/opt/tarantool/app/storage.lua"]
+    environment:
+      INSTANCE_UUID: aaaaaaaa-aaaa-4000-b000-000000000001
+      REPLICASET_UUID: aaaaaaaa-0000-4000-b000-000000000000
+      LISTEN: "0.0.0.0:3301"
+    volumes:
+      - ./tarantool:/opt/tarantool/app:ro
+      - ./data/storage-1:/var/lib/tarantool
+    ports:
+      - "3302:3301"
+    healthcheck:
+      test: ["CMD", "tarantool_is_up"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  storage-2:
+    build: .
+    command: ["tarantool", "/opt/tarantool/app/storage.lua"]
+    environment:
+      INSTANCE_UUID: bbbbbbbb-bbbb-4000-b000-000000000001
+      REPLICASET_UUID: bbbbbbbb-0000-4000-b000-000000000000
+      LISTEN: "0.0.0.0:3301"
+    volumes:
+      - ./tarantool:/opt/tarantool/app:ro
+      - ./data/storage-2:/var/lib/tarantool
+    ports:
+      - "3303:3301"
+    healthcheck:
+      test: ["CMD", "tarantool_is_up"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  router:
+    build: .
+    command: ["tarantool", "/opt/tarantool/app/router.lua"]
+    environment:
+      LISTEN: "0.0.0.0:3301"
+    volumes:
+      - ./tarantool:/opt/tarantool/app:ro
+      - ./data/router:/var/lib/tarantool
+    ports:
+      - "3301:3301"
+    depends_on:
+      storage-1:
+        condition: service_healthy
+      storage-2:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "tarantool_is_up"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
