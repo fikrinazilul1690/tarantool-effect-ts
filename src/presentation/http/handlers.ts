@@ -1,9 +1,7 @@
-import { Effect, Layer } from "effect";
+import { Effect } from "effect";
 import { HttpApiBuilder } from "effect/unstable/httpapi";
-import { TarantoolDb } from "../db";
-import type { CursorPage, User } from "../types";
+import { UserRepository } from "../../domain/user/repository";
 import { Api } from "./api";
-import { ApiAuthorizationLive } from "./auth-middleware";
 import { HealthSuccess, ListUsersSuccess, errorResponse } from "./schemas";
 
 export const SystemHandlers = HttpApiBuilder.group(Api, "system", (handlers) =>
@@ -17,26 +15,19 @@ export const SystemHandlers = HttpApiBuilder.group(Api, "system", (handlers) =>
   ),
 );
 
-const UsersHandlersNoDeps = HttpApiBuilder.group(
+export const UsersHandlers = HttpApiBuilder.group(
   Api,
   "users",
   Effect.fn(function* (handlers) {
-    const db = yield* TarantoolDb;
+    const users = yield* UserRepository;
     return handlers.handle("listUsers", ({ query }) => {
       const limit = query.limit ?? 20;
-      return db
-        .call<CursorPage<User>>("api.users_page", query.cursor ?? null, limit)
+      return users
+        .list(query.cursor ?? null, limit)
         .pipe(
           Effect.map((page) => ListUsersSuccess.make({ data: page })),
-          Effect.mapError((e) => {
-            console.log(e);
-            return errorResponse("DATABASE_ERROR", "Unable to list users");
-          }),
+          Effect.mapError(() => errorResponse("DATABASE_ERROR", "Unable to list users")),
         );
     });
   }),
-);
-
-export const UsersHandlers = UsersHandlersNoDeps.pipe(
-  Layer.provide(ApiAuthorizationLive),
 );

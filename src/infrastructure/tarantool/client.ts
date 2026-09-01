@@ -1,5 +1,5 @@
 import TarantoolConnection from 'tarantool-driver';
-import {Context, Data, Effect, Layer} from 'effect';
+import {Context, Data, Effect, Layer, Schema} from 'effect';
 
 export class TarantoolError extends Data.TaggedError('TarantoolError')<{
   readonly operation: string;
@@ -8,7 +8,11 @@ export class TarantoolError extends Data.TaggedError('TarantoolError')<{
 
 export interface TarantoolDbShape {
   readonly ping: Effect.Effect<void, TarantoolError>;
-  readonly call: <T>(name: string, ...args: ReadonlyArray<unknown>) => Effect.Effect<T, TarantoolError>;
+  readonly call: <A>(
+    schema: Schema.ConstraintDecoder<A>,
+    name: string,
+    ...args: ReadonlyArray<unknown>
+  ) => Effect.Effect<A, TarantoolError>;
 }
 
 export class TarantoolDb extends Context.Service<TarantoolDb, TarantoolDbShape>()(
@@ -40,14 +44,32 @@ export const TarantoolDbLive = Layer.effect(
         try: () => connection.ping().then(() => undefined),
         catch: (cause) => new TarantoolError({operation: 'ping', cause}),
       }),
-      call: <T>(name: string, ...args: ReadonlyArray<unknown>) => Effect.tryPromise({
-        try: async () => unwrap(await connection.call(name, ...args)) as T,
+      call: <A>(schema: Schema.ConstraintDecoder<A>, name: string, ...args: ReadonlyArray<unknown>) => Effect.tryPromise({
+        try: () => connection.call(name, ...args),
         catch: (cause) => new TarantoolError({operation: `call ${name}`, cause}),
-      }),
+      }).pipe(
+        Effect.flatMap((response) => decodeEnvelope(schema, response)),
+        Effect.mapError((cause) => cause instanceof TarantoolError
+          ? cause
+          : new TarantoolError({operation: `decode ${name}`, cause})),
+      ),
     })),
   ),
 );
 
-function unwrap(value: unknown): unknown {
-  return Array.isArray(value) && value.length === 1 ? unwrap(value[0]) : value;
+function decodeEnvelope<A>(schema: Schema.ConstraintDecoder<A>, response: unknown) {
+  const candidates: Array<unknown> = [response];
+  let value = response;
+  while (Array.isArray(value) && value.length === 1) {
+    value = value[0];
+    candidates.push(value);
+  }
+
+  const decode = Schema.decodeUnknownEffect(schema);
+  const attempt = (index: number): Effect.Effect<A, unknown> => decode(candidates[index]).pipe(
+    Effect.catch((error) => index + 1 < candidates.length
+      ? attempt(index + 1)
+      : Effect.fail(error)),
+  );
+  return attempt(0);
 }

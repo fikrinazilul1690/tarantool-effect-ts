@@ -23,7 +23,7 @@ rebalancing much finer-grained than sharding directly by physical server.
 The project pins Tarantool 2.11.8 because its classic Lua application model is
 small and especially good for learning vshard. The binary protocol remains
 compatible with Tarantool 3.x. The Node connector is community-supported, so
-`src/db.ts` deliberately keeps it behind a tiny typed adapter.
+`src/infrastructure/tarantool/client.ts` keeps it behind a typed Effect service.
 
 ## Start here
 
@@ -89,10 +89,16 @@ Read these files in order:
 1. `tarantool/config.lua` — bucket count and topology.
 2. `tarantool/storage.lua` — schema, indexes, CRUD, and transaction logic.
 3. `tarantool/router.lua` — sharding key calculation and `callro`/`callrw`.
-4. `src/db.ts` — `TarantoolDb` Effect service and scoped live layer.
-5. `src/auth/tarantool-adapter.ts` — Better Auth database adapter.
-6. `src/server.ts` — Effect v4 routes, BunHttpServer layer, and BunRuntime.
-7. `examples/` — application usage from TypeScript.
+4. `src/domain/user/` — user models and repository contract.
+5. `src/infrastructure/tarantool/` — client and repository implementation.
+6. `src/infrastructure/auth/` — Better Auth and its Tarantool adapter.
+7. `src/presentation/http/` — Effect HttpApi contracts and server layer.
+8. `src/main.ts` — application layer composition and BunRuntime.
+9. `examples/` — application usage from TypeScript.
+
+See `docs/TARANTOOL_POOL.md` for an optional Effect-managed connection pool
+design. The running project intentionally keeps one shared multiplexed
+connection until benchmarks justify additional sockets.
 
 ## Effect v4 HTTP API and Better Auth
 
@@ -263,8 +269,8 @@ can put data on the wrong shard.
 ```ts
 import {BunRuntime} from '@effect/platform-bun';
 import {Effect} from 'effect';
-import {TarantoolDb, TarantoolDbLive} from './src/db';
-import type {User} from './src/types';
+import type {User} from './src/domain/user/model';
+import {TarantoolDb, TarantoolDbLive} from './src/infrastructure/tarantool/client';
 
 const program = Effect.gen(function*() {
   const db = yield* TarantoolDb;

@@ -1,8 +1,8 @@
 import {betterAuth} from 'better-auth/minimal';
 import {bearer} from 'better-auth/plugins/bearer';
 import {Context, Effect, Layer} from 'effect';
-import {TarantoolDb} from '../db';
-import {Email} from '../email';
+import {Email} from '../email/smtp-email';
+import {TarantoolDb} from '../tarantool/client';
 import {tarantoolAdapter} from './tarantool-adapter';
 
 export interface AuthSession {

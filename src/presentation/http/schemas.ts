@@ -1,23 +1,9 @@
 import {Effect, Schema} from 'effect';
 import {HttpApiSchema} from 'effect/unstable/httpapi';
+import {UserCursorPageSchema, UserSchema} from '../../domain/user/model';
 
-export const UserSchema = Schema.Struct({
-  id: Schema.Number,
-  bucket_id: Schema.Number,
-  email: Schema.String,
-  name: Schema.String,
-  age: Schema.Number,
-  created_at: Schema.Number,
-});
-
-export const CursorPageSchema = Schema.Struct({
-  items: Schema.Array(UserSchema),
-  next_cursor: Schema.NullOr(Schema.String),
-  has_more: Schema.Boolean,
-  totalPage: Schema.Number,
-  currentPage: Schema.Number,
-  lastCursor: Schema.NullOr(Schema.String),
-});
+export {UserSchema};
+export const CursorPageSchema = UserCursorPageSchema;
 
 export const SuccessResponse = <S extends Schema.Top>(data: S) => Schema.Struct({
   success: Schema.Literal(true).pipe(

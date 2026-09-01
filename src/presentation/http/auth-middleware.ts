@@ -1,6 +1,6 @@
 import {Context, Effect, Layer, Redacted} from 'effect';
 import {HttpApiMiddleware, HttpApiSecurity} from 'effect/unstable/httpapi';
-import {BetterAuth} from '../auth/auth';
+import {BetterAuth} from '../../infrastructure/auth/better-auth';
 import {UnauthorizedResponse, errorResponse} from './schemas';
 
 export interface AuthenticatedIdentity {

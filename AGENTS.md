@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 
-`src/` contains the Bun/TypeScript application. Effect services and layers live in `src/db.ts` and `src/auth/`; schema-first HTTP contracts, middleware, and handlers are in `src/api/`. Tarantool topology and Lua stored functions are under `tarantool/`. Runnable lessons belong in `examples/`, while Bun integration tests live in `test/`. Keep connector declarations in `types/` and importable API examples in `postman/`. Docker infrastructure is defined by `compose.yaml` and `Dockerfile`; local database state under `data/` is generated and must not be committed.
+`src/domain/` contains models and service contracts without infrastructure dependencies. Implementations for Tarantool, Better Auth, and SMTP live in `src/infrastructure/`. Schema-first endpoints and middleware are in `src/presentation/http/`; `src/main.ts` is the composition root. Tarantool Lua functions remain under `tarantool/`. Runnable lessons belong in `examples/`, Bun integration tests in `test/`, connector declarations in `types/`, and API examples in `postman/`. Local state under `data/` is generated and must not be committed.
 
 ## Build, Test, and Development Commands
 

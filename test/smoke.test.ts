@@ -1,7 +1,7 @@
 import {expect, test} from 'bun:test';
-import {Effect} from 'effect';
-import {TarantoolDb, TarantoolDbLive} from '../src/db';
-import type {CursorPage, User} from '../src/types';
+import {Effect, Schema} from 'effect';
+import {UserCursorPageSchema, UserSchema, type UserCursorPage} from '../src/domain/user/model';
+import {TarantoolDb, TarantoolDbLive} from '../src/infrastructure/tarantool/client';
 
 const runDb = <A, E>(effect: Effect.Effect<A, E, TarantoolDb>) =>
   Effect.runPromise(effect.pipe(Effect.provide(TarantoolDbLive)));
@@ -9,12 +9,13 @@ const runDb = <A, E>(effect: Effect.Effect<A, E, TarantoolDb>) =>
 test('CRUD travels through the vshard router', () => runDb(Effect.gen(function*() {
   const db = yield* TarantoolDb;
   const id = Date.now();
-  const created = yield* db.call<User>('api.user_create', {id, email: `smoke-${id}@example.com`, name: 'Smoke', age: 1});
+  const created = yield* db.call(UserSchema, 'api.user_create', {id, email: `smoke-${id}@example.com`, name: 'Smoke', age: 1});
+  expect(created).toBeInstanceOf(UserSchema);
   expect(created.id).toBe(id);
-  expect((yield* db.call<User>('api.user_get', id)).name).toBe('Smoke');
-  expect((yield* db.call<User>('api.user_update', id, {age: 2})).age).toBe(2);
-  expect((yield* db.call<User>('api.user_delete', id)).id).toBe(id);
-  expect(yield* db.call<User | null>('api.user_get', id)).toBeNull();
+  expect((yield* db.call(UserSchema, 'api.user_get', id)).name).toBe('Smoke');
+  expect((yield* db.call(UserSchema, 'api.user_update', id, {age: 2})).age).toBe(2);
+  expect((yield* db.call(UserSchema, 'api.user_delete', id)).id).toBe(id);
+  expect(yield* db.call(Schema.NullOr(UserSchema), 'api.user_get', id)).toBeNull();
 })));
 
 test('fetch_pos pagination traverses all shards without duplicates', () => runDb(Effect.gen(function*() {
@@ -24,7 +25,7 @@ test('fetch_pos pagination traverses all shards without duplicates', () => runDb
   for (let offset = 0; offset < 5; offset += 1) {
     const id = seed + offset;
     expectedIds.push(id);
-    yield* db.call<User>('api.user_create', {
+    yield* db.call(UserSchema, 'api.user_create', {
       id, email: `cursor-${id}@example.com`, name: `Cursor ${offset}`, age: 20,
     });
   }
@@ -35,7 +36,7 @@ test('fetch_pos pagination traverses all shards without duplicates', () => runDb
   let lastCursor: string | null = null;
   let totalPage = 0;
   do {
-    const page: CursorPage<User> = yield* db.call<CursorPage<User>>('api.users_page', cursor, 17);
+    const page: UserCursorPage = yield* db.call(UserCursorPageSchema, 'api.users_page', cursor, 17);
     expect(page.currentPage).toBe(expectedPage);
     expect(page.totalPage).toBeGreaterThanOrEqual(page.currentPage);
     if (expectedPage === 1) {
@@ -55,7 +56,7 @@ test('fetch_pos pagination traverses all shards without duplicates', () => runDb
   } while (cursor !== null);
 
   if (lastCursor !== null) {
-    const lastPage = yield* db.call<CursorPage<User>>('api.users_page', lastCursor, 17);
+    const lastPage = yield* db.call(UserCursorPageSchema, 'api.users_page', lastCursor, 17);
     expect(lastPage.currentPage).toBe(totalPage);
     expect(lastPage.next_cursor).toBeNull();
     expect(lastPage.has_more).toBeFalse();
