@@ -29,3 +29,12 @@ This repository currently has no commit history. Use concise imperative subjects
 ## Security & Configuration
 
 Copy `.env.example` to `.env` and replace the development Better Auth secret. Never commit credentials, session tokens, generated data, or production connection details. Treat Tarantool Admin and exposed storage ports as local-development tools only.
+
+## Agent Skills
+
+Repository-specific skills are stored under `.agents/skills`.
+
+When working with Effect TS, use the `effect-v4` skill.
+
+Do not assume Effect v3 examples are compatible with this repository.
+Check the installed Effect version before using unfamiliar APIs.
