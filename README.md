@@ -243,6 +243,11 @@ at-least-once: a crash after the provider accepts mail but before acknowledgemen
 can produce a duplicate. Dead-letter redrive, retention, provider idempotency,
 and queue metrics remain production checklist items.
 
+For a future SQL-backed Effect Workflow/Cluster replacement, including typed
+workflow contracts, durable submission, SMTP activities, runner layers, and a
+staged migration from this outbox, see
+[`docs/EFFECT_CLUSTER_EMAIL_WORKFLOW.md`](docs/EFFECT_CLUSTER_EMAIL_WORKFLOW.md).
+
 Create an account; Better Auth waits only for a durable Tarantool outbox insert
 and returns without waiting for SMTP. An Effect worker leases and delivers the
 email in the background. Sign-up returns no token until the recipient verifies
