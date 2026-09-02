@@ -1,4 +1,19 @@
 services:
+  volume-init:
+    build: .
+    user: "0:0"
+    entrypoint: ["sh", "-c"]
+    command:
+      - >-
+        chown -R 1000:0 /data/storage-1 /data/storage-2 /data/router /data/router-2 &&
+        chmod 0700 /data/storage-1 /data/storage-2 /data/router /data/router-2
+    volumes:
+      - storage-1-data:/data/storage-1
+      - storage-2-data:/data/storage-2
+      - router-data:/data/router
+      - router-2-data:/data/router-2
+    restart: "no"
+
   tarantool-admin:
     image: quay.io/basis-company/tarantool-admin:latest
     restart: unless-stopped
@@ -19,9 +34,12 @@ services:
       LISTEN: "0.0.0.0:3301"
     volumes:
       - ./tarantool:/opt/tarantool/app:ro
-      - ./data/storage-1:/var/lib/tarantool
+      - storage-1-data:/var/lib/tarantool
     ports:
       - "3302:3301"
+    depends_on:
+      volume-init:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "env", "-u", "TT_APP_NAME", "-u", "TT_INSTANCE_NAME", "tarantool", "/opt/tarantool/app/healthcheck.lua"]
       interval: 2s
@@ -39,9 +57,12 @@ services:
       LISTEN: "0.0.0.0:3301"
     volumes:
       - ./tarantool:/opt/tarantool/app:ro
-      - ./data/storage-2:/var/lib/tarantool
+      - storage-2-data:/var/lib/tarantool
     ports:
       - "3303:3301"
+    depends_on:
+      volume-init:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "env", "-u", "TT_APP_NAME", "-u", "TT_INSTANCE_NAME", "tarantool", "/opt/tarantool/app/healthcheck.lua"]
       interval: 2s
@@ -57,7 +78,7 @@ services:
       LISTEN: "0.0.0.0:3301"
     volumes:
       - ./tarantool:/opt/tarantool/app:ro
-      - ./data/router:/var/lib/tarantool
+      - router-data:/var/lib/tarantool
     ports:
       - "3301:3301"
     depends_on:
@@ -80,7 +101,7 @@ services:
       LISTEN: "0.0.0.0:3301"
     volumes:
       - ./tarantool:/opt/tarantool/app:ro
-      - ./data/router-2:/var/lib/tarantool
+      - router-2-data:/var/lib/tarantool
     ports:
       - "3304:3301"
     depends_on:
@@ -93,3 +114,9 @@ services:
       interval: 2s
       timeout: 2s
       retries: 30
+
+volumes:
+  storage-1-data:
+  storage-2-data:
+  router-data:
+  router-2-data:

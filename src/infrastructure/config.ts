@@ -18,6 +18,14 @@ export interface AppConfigShape {
     readonly user: string | undefined;
     readonly password: string | undefined;
     readonly from: string | undefined;
+    readonly workerPollMs: number;
+    readonly workerBatchSize: number;
+    readonly workerConcurrency: number;
+    readonly leaseMs: number;
+    readonly sendTimeoutMs: number;
+    readonly maxAttempts: number;
+    readonly retryBaseMs: number;
+    readonly retryMaxMs: number;
   };
 }
 
@@ -67,6 +75,14 @@ const AppConfigSchema = Schema.Struct({
     user: OptionalTrimmedString,
     password: OptionalTrimmedString,
     from: OptionalTrimmedString,
+    workerPollMs: BoundedInteger(50, 60_000),
+    workerBatchSize: BoundedInteger(1, 1_000),
+    workerConcurrency: BoundedInteger(1, 100),
+    leaseMs: BoundedInteger(1_000, 900_000),
+    sendTimeoutMs: BoundedInteger(100, 300_000),
+    maxAttempts: BoundedInteger(1, 100),
+    retryBaseMs: BoundedInteger(100, 300_000),
+    retryMaxMs: BoundedInteger(100, 3_600_000),
   }),
 }).check(Schema.makeFilter((config) => {
   const issues: Array<Schema.FilterIssue> = [];
@@ -81,6 +97,12 @@ const AppConfigSchema = Schema.Struct({
       if (config.email[field] === undefined) {
         issues.push({path: ['email', field], issue: 'is required when email delivery is enabled'});
       }
+    }
+    if (config.email.leaseMs <= config.email.sendTimeoutMs) {
+      issues.push({path: ['email', 'leaseMs'], issue: 'must be greater than email.sendTimeoutMs'});
+    }
+    if (config.email.retryMaxMs < config.email.retryBaseMs) {
+      issues.push({path: ['email', 'retryMaxMs'], issue: 'must be at least email.retryBaseMs'});
     }
   }
   return issues;
@@ -124,6 +146,14 @@ const EnvironmentConfig = Config.all({
   smtpUser: optionalString('SMTP_USER'),
   smtpPassword: optionalString('SMTP_PASSWORD'),
   emailFrom: optionalString('EMAIL_FROM'),
+  emailWorkerPollMs: integer('EMAIL_WORKER_POLL_MS', 500, 50, 60_000),
+  emailWorkerBatchSize: integer('EMAIL_WORKER_BATCH_SIZE', 20, 1, 1_000),
+  emailWorkerConcurrency: integer('EMAIL_WORKER_CONCURRENCY', 5, 1, 100),
+  emailLeaseMs: integer('EMAIL_LEASE_MS', 60_000, 1_000, 900_000),
+  emailSendTimeoutMs: integer('EMAIL_SEND_TIMEOUT_MS', 15_000, 100, 300_000),
+  emailMaxAttempts: integer('EMAIL_MAX_ATTEMPTS', 8, 1, 100),
+  emailRetryBaseMs: integer('EMAIL_RETRY_BASE_MS', 1_000, 100, 300_000),
+  emailRetryMaxMs: integer('EMAIL_RETRY_MAX_MS', 300_000, 100, 3_600_000),
 });
 
 export const AppConfigLive = Layer.effect(
@@ -167,6 +197,14 @@ export const AppConfigLive = Layer.effect(
         user: raw.smtpUser,
         password: raw.smtpPassword,
         from: raw.emailFrom,
+        workerPollMs: raw.emailWorkerPollMs,
+        workerBatchSize: raw.emailWorkerBatchSize,
+        workerConcurrency: raw.emailWorkerConcurrency,
+        leaseMs: raw.emailLeaseMs,
+        sendTimeoutMs: raw.emailSendTimeoutMs,
+        maxAttempts: raw.emailMaxAttempts,
+        retryBaseMs: raw.emailRetryBaseMs,
+        retryMaxMs: raw.emailRetryMaxMs,
       },
     });
   }).pipe(Effect.mapError((cause) => new ConfigError({

@@ -25,6 +25,8 @@ test('Effect Config and Schema transform environment values', async () => {
   expect(config.tarantool.maxInFlight).toBe(512);
   expect(config.auth.debug).toBe(true);
   expect(config.auth.baseUrl).toBe('https://auth.example.com/');
+  expect(config.email.workerConcurrency).toBe(5);
+  expect(config.email.leaseMs).toBeGreaterThan(config.email.sendTimeoutMs);
 });
 
 test('Schema rejects invalid cross-service deadlines', async () => {

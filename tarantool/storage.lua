@@ -37,6 +37,13 @@ local function nullable(value)
 	return value == nil and box.NULL or value
 end
 
+local function normalize_email(email)
+	if type(email) ~= "string" then
+		return nil
+	end
+	return string.lower(string.match(email, "^%s*(.-)%s*$"))
+end
+
 box.once("schema-v1", function()
 	box.schema.user.create("storage", { password = "storage-secret", if_not_exists = true })
 	box.schema.user.grant("storage", "read,write,execute", "universe", nil, { if_not_exists = true })
@@ -148,6 +155,166 @@ box.once("better-auth-email-index-v2", function()
 		unique = true,
 		if_not_exists = true,
 	})
+end)
+
+box.once("better-auth-global-unique-indexes-v3", function()
+	if box.space.auth_records.index.email ~= nil then
+		box.space.auth_records.index.email:drop()
+	end
+	box.space.auth_records:format({
+		{ name = "key", type = "string" },
+		{ name = "bucket_id", type = "unsigned" },
+		{ name = "model", type = "string" },
+		{ name = "id", type = "string" },
+		{ name = "data", type = "map" },
+		{ name = "email", type = "string", is_nullable = true },
+		{ name = "token", type = "string", is_nullable = true },
+		{ name = "userId", type = "string", is_nullable = true },
+		{ name = "accountId", type = "string", is_nullable = true },
+		{ name = "providerId", type = "string", is_nullable = true },
+		{ name = "identifier", type = "string", is_nullable = true },
+		{ name = "expiresAt", type = "scalar", is_nullable = true },
+		{ name = "normalizedEmail", type = "string", is_nullable = true },
+	})
+	for _, tuple in box.space.auth_records.index.primary:pairs() do
+		local data = tuple.data
+		box.space.auth_records:replace({
+			tuple.key,
+			tuple.bucket_id,
+			tuple.model,
+			tuple.id,
+			data,
+			nullable(data.email),
+			nullable(data.token),
+			nullable(data.userId),
+			nullable(data.accountId),
+			nullable(data.providerId),
+			nullable(data.identifier),
+			nullable(data.expiresAt),
+			nullable(tuple.model == "user" and normalize_email(data.email) or nil),
+		})
+	end
+	box.space.auth_records:create_index("unique_user_email", {
+		parts = {
+			{ field = "model", type = "string" },
+			{ field = "normalizedEmail", type = "string", is_nullable = true, exclude_null = true },
+		},
+		unique = true,
+		if_not_exists = true,
+	})
+	box.space.auth_records:create_index("unique_session_token", {
+		parts = {
+			{ field = "model", type = "string" },
+			{ field = "token", type = "string", is_nullable = true, exclude_null = true },
+		},
+		unique = true,
+		if_not_exists = true,
+	})
+	box.space.auth_records:create_index("unique_provider_account", {
+		parts = {
+			{ field = "model", type = "string" },
+			{ field = "providerId", type = "string", is_nullable = true, exclude_null = true },
+			{ field = "accountId", type = "string", is_nullable = true, exclude_null = true },
+		},
+		unique = true,
+		if_not_exists = true,
+	})
+end)
+
+box.once("better-auth-verification-created-at-v4", function()
+	box.space.auth_records:format({
+		{ name = "key", type = "string" },
+		{ name = "bucket_id", type = "unsigned" },
+		{ name = "model", type = "string" },
+		{ name = "id", type = "string" },
+		{ name = "data", type = "map" },
+		{ name = "email", type = "string", is_nullable = true },
+		{ name = "token", type = "string", is_nullable = true },
+		{ name = "userId", type = "string", is_nullable = true },
+		{ name = "accountId", type = "string", is_nullable = true },
+		{ name = "providerId", type = "string", is_nullable = true },
+		{ name = "identifier", type = "string", is_nullable = true },
+		{ name = "expiresAt", type = "scalar", is_nullable = true },
+		{ name = "normalizedEmail", type = "string", is_nullable = true },
+		{ name = "createdAt", type = "scalar", is_nullable = true },
+	})
+	for _, tuple in box.space.auth_records.index.primary:pairs() do
+		box.space.auth_records:update({ tuple.key }, { { "=", "createdAt", nullable(tuple.data.createdAt) } })
+	end
+	box.space.auth_records:create_index("verification_identifier_createdAt", {
+		parts = {
+			{ field = "model", type = "string" },
+			{ field = "identifier", type = "string", is_nullable = true, exclude_null = true },
+			{ field = "createdAt", type = "scalar", is_nullable = true, exclude_null = true },
+			{ field = "id", type = "string" },
+		},
+		unique = true,
+		if_not_exists = true,
+	})
+end)
+
+local function create_email_outbox(name, engine)
+	local outbox = box.schema.space.create(name, {
+		if_not_exists = true,
+		engine = engine,
+		format = {
+			{ name = "id", type = "string" },
+			{ name = "bucket_id", type = "unsigned" },
+			{ name = "payload", type = "map" },
+			{ name = "status", type = "string" },
+			{ name = "attempts", type = "unsigned" },
+			{ name = "next_attempt_at", type = "unsigned" },
+			{ name = "lease_owner", type = "string", is_nullable = true },
+			{ name = "last_error", type = "string", is_nullable = true },
+			{ name = "created_at", type = "unsigned" },
+			{ name = "updated_at", type = "unsigned" },
+		},
+	})
+	outbox:create_index("primary", {
+		parts = { { field = "id", type = "string" } },
+		if_not_exists = true,
+	})
+	outbox:create_index("bucket_id", {
+		parts = { { field = "bucket_id", type = "unsigned" } },
+		unique = false,
+		if_not_exists = true,
+	})
+	outbox:create_index("due", {
+		parts = {
+			{ field = "status", type = "string" },
+			{ field = "next_attempt_at", type = "unsigned" },
+			{ field = "id", type = "string" },
+		},
+		unique = true,
+		if_not_exists = true,
+	})
+	return outbox
+end
+
+box.once("email-outbox-v1", function()
+	-- Queue growth during an SMTP outage must consume disk rather than the
+	-- storage instance's fixed memtx arena.
+	create_email_outbox("email_outbox", "vinyl")
+end)
+
+-- Early development builds briefly created v1 as memtx. Preserve any queued
+-- rows while upgrading those installations to the production vinyl engine.
+box.once("email-outbox-v2-vinyl", function()
+	local current = box.space.email_outbox
+	local replacement = box.space.email_outbox_vinyl
+	if current == nil and replacement ~= nil then
+		replacement:rename("email_outbox")
+		return
+	end
+	if current == nil or current.engine == "vinyl" then
+		return
+	end
+	replacement = create_email_outbox("email_outbox_vinyl", "vinyl")
+	for _, tuple in current.index.primary:pairs() do
+		replacement:replace(tuple)
+	end
+	current:drop()
+	replacement:rename("email_outbox")
 end)
 
 box.once("users-counter-v1", function()
@@ -372,17 +539,40 @@ local function compare(actual, condition)
 	error("unsupported where operator: " .. tostring(operator))
 end
 
-local function matches(data, where)
+local function matches(model, data, where)
 	if where == nil or #where == 0 then
 		return true
 	end
-	local result = compare(data[where[1].field], where[1])
+	local first = where[1]
+	local first_actual = data[first.field]
+	if model == "user" and first.field == "email" then
+		first_actual = normalize_email(first_actual)
+		first = {
+			field = first.field,
+			value = normalize_email(first.value),
+			operator = first.operator,
+			connector = first.connector,
+			mode = first.mode,
+		}
+	end
+	local result = compare(first_actual, first)
 	for index = 2, #where do
 		local condition = where[index]
+		local actual = data[condition.field]
+		if model == "user" and condition.field == "email" then
+			actual = normalize_email(actual)
+			condition = {
+				field = condition.field,
+				value = normalize_email(condition.value),
+				operator = condition.operator,
+				connector = condition.connector,
+				mode = condition.mode,
+			}
+		end
 		if condition.connector == "OR" then
-			result = result or compare(data[condition.field], condition)
+			result = result or compare(actual, condition)
 		else
-			result = result and compare(data[condition.field], condition)
+			result = result and compare(actual, condition)
 		end
 	end
 	return result
@@ -403,13 +593,15 @@ function storage_api.auth_create(model, data, bucket_id)
 		nullable(data.providerId),
 		nullable(data.identifier),
 		nullable(data.expiresAt),
+		nullable(model == "user" and normalize_email(data.email) or nil),
+		nullable(data.createdAt),
 	})
 	return data
 end
 
 local auth_indexes = {
-	email = "model_email",
-	token = "model_token",
+	email = "unique_user_email",
+	token = "unique_session_token",
 	userId = "model_userId",
 	accountId = "model_accountId",
 	providerId = "model_providerId",
@@ -459,6 +651,18 @@ local function auth_scan(model, where, sort_by)
 			end
 		end
 	end
+	if model == "verification" and sort_by ~= nil and sort_by ~= box.NULL and sort_by.field == "createdAt" then
+		for _, condition in ipairs(where or {}) do
+			if condition.field == "identifier" and (condition.operator == nil or condition.operator == "eq") then
+				return model_bounded_pairs(
+					box.space.auth_records.index.verification_identifier_createdAt,
+					model,
+					{ model, condition.value },
+					sort_by.direction == "desc" and "REQ" or "EQ"
+				)
+			end
+		end
+	end
 
 	if sort_by ~= nil and sort_by ~= box.NULL and auth_indexes[sort_by.field] ~= nil then
 		return model_bounded_pairs(
@@ -472,10 +676,14 @@ local function auth_scan(model, where, sort_by)
 		for _, condition in ipairs(where) do
 			local iterator = auth_iterators[condition.operator or "eq"]
 			if auth_indexes[condition.field] ~= nil and iterator ~= nil then
+				local value = condition.value
+				if model == "user" and condition.field == "email" then
+					value = normalize_email(value)
+				end
 				return model_bounded_pairs(
 					box.space.auth_records.index[auth_indexes[condition.field]],
 					model,
-					{ model, condition.value },
+					{ model, value },
 					iterator
 				)
 			end
@@ -491,7 +699,7 @@ function storage_api.auth_find(model, where, limit, sort_by)
 	local result = {}
 	local scanned = 0
 	for _, tuple in auth_scan(model, where, sort_by) do
-		if matches(tuple.data, where) then
+		if matches(model, tuple.data, where) then
 			table.insert(result, tuple.data)
 			if limit ~= nil and limit ~= box.NULL and #result >= limit then
 				break
@@ -508,7 +716,7 @@ end
 function storage_api.auth_count(model, where)
 	local total, scanned = 0, 0
 	for _, tuple in auth_scan(model, where, box.NULL) do
-		if matches(tuple.data, where) then
+		if matches(model, tuple.data, where) then
 			total = total + 1
 		end
 		scanned = scanned + 1
@@ -533,18 +741,41 @@ local function replace_auth_data(tuple, data)
 		nullable(data.providerId),
 		nullable(data.identifier),
 		nullable(data.expiresAt),
+		nullable(tuple.model == "user" and normalize_email(data.email) or nil),
+		nullable(data.createdAt),
 	})
+end
+
+local function reject_shard_key_change(model, tuple, changes)
+	if model == "user" and changes.email ~= nil and normalize_email(changes.email) ~= tuple.normalizedEmail then
+		error("user email changes require an explicit cross-bucket migration")
+	end
+	if model == "session" and changes.token ~= nil and changes.token ~= tuple.token then
+		error("session token is immutable")
+	end
+	if model == "account" then
+		if changes.providerId ~= nil and changes.providerId ~= tuple.providerId then
+			error("account providerId is immutable")
+		end
+		if changes.accountId ~= nil and changes.accountId ~= tuple.accountId then
+			error("account accountId is immutable")
+		end
+	end
+	if model == "verification" and changes.identifier ~= nil and changes.identifier ~= tuple.identifier then
+		error("verification identifier is immutable")
+	end
 end
 
 function storage_api.auth_update_one(model, where, changes, consume, increments)
 	return box.atomic(function()
 		for _, tuple in auth_scan(model, where, box.NULL) do
-			if matches(tuple.data, where) then
+		if matches(model, tuple.data, where) then
 				local data = tuple.data
 				if consume then
 					box.space.auth_records:delete({ tuple.key })
 					return data
 				end
+				reject_shard_key_change(model, tuple, changes)
 				for field, value in pairs(changes or {}) do
 					data[field] = value
 				end
@@ -563,7 +794,7 @@ function storage_api.auth_update_many(model, where, changes, remove)
 	return box.atomic(function()
 		local keys = {}
 		for _, tuple in auth_scan(model, where, box.NULL) do
-			if matches(tuple.data, where) then
+		if matches(model, tuple.data, where) then
 				table.insert(keys, tuple.key)
 			end
 		end
@@ -572,6 +803,7 @@ function storage_api.auth_update_many(model, where, changes, remove)
 				box.space.auth_records:delete({ key })
 			else
 				local tuple = box.space.auth_records:get({ key })
+				reject_shard_key_change(model, tuple, changes)
 				local data = tuple.data
 				for field, value in pairs(changes or {}) do
 					data[field] = value
@@ -580,6 +812,116 @@ function storage_api.auth_update_many(model, where, changes, remove)
 			end
 		end
 		return #keys
+	end)
+end
+
+function storage_api.email_outbox_enqueue(job, bucket_id)
+	return box.atomic(function()
+		local existing = box.space.email_outbox:get({ job.id })
+		if existing ~= nil then
+			return existing.id
+		end
+		box.space.email_outbox:insert({
+			job.id,
+			bucket_id,
+			job.payload,
+			"pending",
+			0,
+			job.created_at,
+			box.NULL,
+			box.NULL,
+			job.created_at,
+			job.created_at,
+		})
+		return job.id
+	end)
+end
+
+local function claim_due(status, owner, now, lease_until, limit, jobs)
+	local ids = {}
+	for _, tuple in box.space.email_outbox.index.due:pairs({ status, 0 }, { iterator = "GE" }) do
+		if tuple.status ~= status or tuple.next_attempt_at > now or #jobs + #ids >= limit then
+			break
+		end
+		table.insert(ids, tuple.id)
+	end
+	-- Do not mutate the indexed fields while its iterator is active: collect a
+	-- bounded set of primary keys first, then lease those exact rows atomically.
+	for _, id in ipairs(ids) do
+		local tuple = box.space.email_outbox:get({ id })
+		if tuple ~= nil and tuple.status == status and tuple.next_attempt_at <= now then
+		local updated = box.space.email_outbox:update({ tuple.id }, {
+			{ "=", "status", "processing" },
+			{ "+", "attempts", 1 },
+			{ "=", "next_attempt_at", lease_until },
+			{ "=", "lease_owner", owner },
+			{ "=", "updated_at", now },
+		})
+		table.insert(jobs, { id = updated.id, payload = updated.payload, attempts = updated.attempts })
+		end
+	end
+end
+
+function storage_api.email_outbox_claim(owner, now, lease_ms, limit)
+	return box.atomic(function()
+		local jobs = {}
+		local lease_until = now + lease_ms
+		-- Expired processing leases are reclaimed first, then new work. Both
+		-- paths are bounded index scans and never scan the full outbox.
+		claim_due("processing", owner, now, lease_until, limit, jobs)
+		if #jobs < limit then
+			claim_due("pending", owner, now, lease_until, limit, jobs)
+		end
+		return jobs
+	end)
+end
+
+function storage_api.email_outbox_claim_one(id, owner, now, lease_ms)
+	return box.atomic(function()
+		local tuple = box.space.email_outbox:get({ id })
+		if tuple == nil or (tuple.status ~= "pending" and tuple.status ~= "processing") then
+			return nil
+		end
+		if tuple.next_attempt_at > now then
+			return nil
+		end
+		local updated = box.space.email_outbox:update({ id }, {
+			{ "=", "status", "processing" },
+			{ "+", "attempts", 1 },
+			{ "=", "next_attempt_at", now + lease_ms },
+			{ "=", "lease_owner", owner },
+			{ "=", "updated_at", now },
+		})
+		return { id = updated.id, payload = updated.payload, attempts = updated.attempts }
+	end)
+end
+
+function storage_api.email_outbox_ack(id, owner)
+	return box.atomic(function()
+		local tuple = box.space.email_outbox:get({ id })
+		if tuple == nil or tuple.status ~= "processing" or tuple.lease_owner ~= owner then
+			return false
+		end
+		box.space.email_outbox:delete({ id })
+		return true
+	end)
+end
+
+function storage_api.email_outbox_fail(id, owner, retry_at, max_attempts, last_error, now)
+	return box.atomic(function()
+		local tuple = box.space.email_outbox:get({ id })
+		if tuple == nil or tuple.status ~= "processing" or tuple.lease_owner ~= owner then
+			return false
+		end
+		local status = tuple.attempts >= max_attempts and "dead" or "pending"
+		box.space.email_outbox:update({ id }, {
+			{ "=", "status", status },
+			{ "=", "next_attempt_at", retry_at },
+			{ "=", "lease_owner", box.NULL },
+			{ "=", "last_error", last_error },
+			{ "=", "updated_at", now },
+		})
+		return true
 	end)
 end
 
@@ -597,6 +939,11 @@ box.schema.func.create("storage_api.auth_find", { if_not_exists = true })
 box.schema.func.create("storage_api.auth_count", { if_not_exists = true })
 box.schema.func.create("storage_api.auth_update_one", { if_not_exists = true })
 box.schema.func.create("storage_api.auth_update_many", { if_not_exists = true })
+box.schema.func.create("storage_api.email_outbox_enqueue", { if_not_exists = true })
+box.schema.func.create("storage_api.email_outbox_claim", { if_not_exists = true })
+box.schema.func.create("storage_api.email_outbox_claim_one", { if_not_exists = true })
+box.schema.func.create("storage_api.email_outbox_ack", { if_not_exists = true })
+box.schema.func.create("storage_api.email_outbox_fail", { if_not_exists = true })
 
 -- Initialize after application spaces and formats exist so CRUD can publish a
 -- consistent schema and install its rebalance-safe storage procedures.

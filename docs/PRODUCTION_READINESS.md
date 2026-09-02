@@ -74,22 +74,26 @@ redundancy. See the
 Current state:
 
 - The custom adapter declares `transaction: false`.
-- `email`, `token`, and account identity indexes are unique only inside one
-  physical shard, not across the cluster.
-- A non-ID “mutate one” request is scattered to every shard master. If duplicate
-  records exist, more than one record can be changed before the router reports
-  the violation.
+- Normalized user email, session token, and `[providerId, accountId]` are routed
+  by their logical value and protected by storage-local unique indexes. Equal
+  keys therefore meet on one vshard bucket and are globally unique.
+- IDs returned for new auth records encode their logical bucket, allowing
+  ID-only point operations without a scatter or physical replica-set identity.
+- Shard-key mutation is rejected instead of leaving a record on a bucket that
+  no longer matches its lookup key.
+- Legacy records created with `model:id` routing have no automatic staged
+  migration to canonical model-aware buckets.
 - Better Auth plugin upgrades can introduce models, fields, `OR` predicates, or
   query patterns not supported by the custom planner.
 
 Required state:
 
-- Enforce global uniqueness for user email, session token, and the account
-  identity key required by the installed Better Auth version.
 - Provide real rollback for multi-record signup, linking, session, verification,
   consume, and increment workflows.
-- Resolve every mutate-one request to exactly one bucket before writing. Never
-  scatter a single-record mutation.
+- Implement a preflight/backfill/conflict-resolution migration for legacy auth
+  data before deploying model-aware routing to an existing cluster.
+- Resolve every mutate-one request to exactly one bucket before writing; remove
+  the legacy scatter fallback after migration completion.
 - Generate and compare the required Better Auth schema for every upgrade.
 - Run the upstream adapter conformance tests plus local race and failure tests.
 
@@ -317,7 +321,8 @@ Current state:
 - Secret rotation is not configured.
 - Rate limiting relies on environment defaults and would be per-process memory.
 - Proxy-derived client IP behavior is not configured.
-- Verification email is sent synchronously in the authentication request.
+- Verification email is durably enqueued during authentication and delivered
+  asynchronously by the Effect worker.
 - Disabled delivery logs verification URLs, which contain secrets.
 - There is no password-reset delivery path, shared abuse control, or auth audit
   pipeline documented here.
@@ -330,8 +335,8 @@ Required state:
 - Use a shared rate-limit backend and endpoint-specific rules for signup,
   signin, verification, reset, and token endpoints.
 - Configure trusted proxies and client-IP extraction explicitly.
-- Send email through a durable outbox/queue with idempotency, bounded retry,
-  dead-letter handling, and delivery metrics.
+- Complete the existing durable outbox with provider idempotency, delivery
+  metrics, dead-letter redrive/retention, and verification-secret protection.
 - Never log tokens, verification URLs, passwords, cookies, authorization
   headers, SMTP credentials, or sensitive adapter payloads.
 - Add security event logging and alerts for credential abuse and anomalous
@@ -478,7 +483,12 @@ checked and linked to evidence:
 - [ ] Reconnect, retry, deadline, circuit-breaker, and overload policies work.
 - [ ] Better Auth secrets, origins, cookies, proxies, and shared rate limits are
       explicitly configured.
-- [ ] Email uses a durable queue/outbox and does not leak verification secrets.
+- [x] Email SMTP delivery is decoupled from auth requests through a durable
+  vshard-aware outbox with leases, bounded workers, retries, and dead-letter
+  state.
+- [ ] Encrypt or minimize verification secrets in outbox payloads, implement
+  dead-letter redrive/retention, export worker metrics, and complete sustained
+  SMTP fault/load testing.
 - [ ] Logs, metrics, traces, dashboards, alerts, and runbooks are operational.
 - [ ] Correctness, race, failover, rebalance, security, load, and soak tests pass.
 - [ ] Disaster recovery and credential-rotation exercises pass.

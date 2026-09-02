@@ -259,24 +259,106 @@ function api.cluster_info()
 	return { bucket_count = common.bucket_count, replicasets = info.replicasets }
 end
 
-local function auth_id(where)
+local function normalize_email(email)
+	if type(email) ~= "string" then
+		return nil
+	end
+	return string.lower(string.match(email, "^%s*(.-)%s*$"))
+end
+
+local function auth_condition(where, field)
 	for _, condition in ipairs(where or {}) do
-		if condition.field == "id" and (condition.operator == nil or condition.operator == "eq") then
+		if condition.field == field and (condition.operator == nil or condition.operator == "eq") then
 			return condition.value
 		end
 	end
 	return nil
 end
 
-local function auth_bucket(model, id)
-	return vshard.router.bucket_id_strcrc32(model .. ":" .. id)
+local function encoded_auth_bucket(id)
+	if type(id) ~= "string" then
+		return nil
+	end
+	local encoded = string.match(id, "^b(%d+)_")
+	local bucket_id = tonumber(encoded)
+	if bucket_id == nil or bucket_id < 1 or bucket_id > common.bucket_count then
+		return nil
+	end
+	return bucket_id
+end
+
+local function auth_unique_bucket(model, data)
+	if model == "user" then
+		local email = normalize_email(data.email)
+		if email == nil or email == "" then
+			error("Better Auth user email is required")
+		end
+		return vshard.router.bucket_id_strcrc32("user-email:" .. email)
+	end
+	if model == "session" then
+		if type(data.token) ~= "string" or data.token == "" then
+			error("Better Auth session token is required")
+		end
+		return vshard.router.bucket_id_strcrc32("session-token:" .. data.token)
+	end
+	if model == "account" then
+		if type(data.providerId) ~= "string" or type(data.accountId) ~= "string" then
+			error("Better Auth account providerId and accountId are required")
+		end
+		return vshard.router.bucket_id_strcrc32("account:" .. data.providerId .. ":" .. data.accountId)
+	end
+	if model == "verification" then
+		if type(data.identifier) ~= "string" or data.identifier == "" then
+			error("Better Auth verification identifier is required")
+		end
+		return vshard.router.bucket_id_strcrc32("verification:" .. data.identifier)
+	end
+	return vshard.router.bucket_id_strcrc32(model .. ":" .. data.id)
+end
+
+local function auth_where_bucket(model, where)
+	local id = auth_condition(where, "id")
+	local bucket_id = encoded_auth_bucket(id)
+	if bucket_id ~= nil then
+		return bucket_id
+	end
+	if model == "user" then
+		local email = normalize_email(auth_condition(where, "email"))
+		if email ~= nil and email ~= "" then
+			return vshard.router.bucket_id_strcrc32("user-email:" .. email)
+		end
+	elseif model == "session" then
+		local token = auth_condition(where, "token")
+		if type(token) == "string" and token ~= "" then
+			return vshard.router.bucket_id_strcrc32("session-token:" .. token)
+		end
+	elseif model == "account" then
+		local provider_id = auth_condition(where, "providerId")
+		local account_id = auth_condition(where, "accountId")
+		if type(provider_id) == "string" and type(account_id) == "string" then
+			return vshard.router.bucket_id_strcrc32("account:" .. provider_id .. ":" .. account_id)
+		end
+	elseif model == "verification" then
+		local identifier = auth_condition(where, "identifier")
+		if type(identifier) == "string" and identifier ~= "" then
+			return vshard.router.bucket_id_strcrc32("verification:" .. identifier)
+		end
+	end
+	return nil
 end
 
 function api.auth_create(model, data)
 	if type(data.id) ~= "string" then
 		error("Better Auth record id must be a string")
 	end
-	local bucket_id = auth_bucket(model, data.id)
+	local bucket_id = auth_unique_bucket(model, data)
+	local supplied_bucket = encoded_auth_bucket(data.id)
+	if supplied_bucket ~= nil and supplied_bucket ~= bucket_id then
+		error("Better Auth record id belongs to a different bucket")
+	end
+	if supplied_bucket == nil then
+		data.id = "b" .. bucket_id .. "_" .. data.id
+	end
 	return vshard.router.callrw(bucket_id, "storage_api.auth_create", { model, data, bucket_id })
 end
 
@@ -293,10 +375,10 @@ function api.auth_find_many(model, where, limit, offset, sort_by)
 		error("auth query offset must be between 0 and 10000")
 	end
 	local rows = {}
-	local id = auth_id(where)
-	if id ~= nil then
+	local bucket_id = auth_where_bucket(model, where)
+	if bucket_id ~= nil then
 		local shard_rows, err = vshard.router.callro(
-			auth_bucket(model, id),
+			bucket_id,
 			"storage_api.auth_find",
 			{ model, where or {}, requested + skipped, sort_by or box.NULL },
 			{ timeout = common.read_timeout }
@@ -344,10 +426,10 @@ function api.auth_find_many(model, where, limit, offset, sort_by)
 end
 
 function api.auth_count(model, where)
-	local id = auth_id(where)
-	if id ~= nil then
+	local bucket_id = auth_where_bucket(model, where)
+	if bucket_id ~= nil then
 		local count, err = vshard.router.callro(
-			auth_bucket(model, id),
+			bucket_id,
 			"storage_api.auth_count",
 			{ model, where or {} },
 			{ timeout = common.read_timeout }
@@ -365,10 +447,10 @@ function api.auth_count(model, where)
 end
 
 local function auth_mutate_one(model, where, changes, consume, increments)
-	local id = auth_id(where)
-	if id ~= nil then
+	local bucket_id = auth_where_bucket(model, where)
+	if bucket_id ~= nil then
 		local row, err = vshard.router.callrw(
-			auth_bucket(model, id),
+			bucket_id,
 			"storage_api.auth_update_one",
 			{ model, where, changes or {}, consume or false, increments or {} },
 			{ timeout = common.read_timeout }
@@ -424,6 +506,79 @@ function api.auth_update_many(model, where, changes, remove)
 	return count
 end
 
+local function email_outbox_bucket(id)
+	local encoded = encoded_auth_bucket(id)
+	if encoded ~= nil then
+		return encoded
+	end
+	return vshard.router.bucket_id_strcrc32("email-outbox:" .. id)
+end
+
+function api.email_outbox_enqueue(job)
+	if type(job) ~= "table" or type(job.id) ~= "string" or type(job.payload) ~= "table" then
+		error("invalid email outbox job")
+	end
+	local bucket_id = email_outbox_bucket(job.id)
+	if encoded_auth_bucket(job.id) == nil then
+		job.id = "b" .. bucket_id .. "_" .. job.id
+	end
+	return vshard.router.callrw(
+		bucket_id,
+		"storage_api.email_outbox_enqueue",
+		{ job, bucket_id },
+		{ timeout = common.read_timeout }
+	)
+end
+
+function api.email_outbox_claim(owner, now, lease_ms, limit)
+	if type(owner) ~= "string" or type(now) ~= "number" or type(lease_ms) ~= "number" then
+		error("invalid email outbox claim")
+	end
+	if type(limit) ~= "number" or limit < 1 or limit > 1000 then
+		error("email outbox claim limit must be between 1 and 1000 per shard")
+	end
+	local jobs = {}
+	for _, shard_jobs in ipairs(scatter_callrw(
+		"storage_api.email_outbox_claim",
+		{ owner, now, lease_ms, limit }
+	)) do
+		for _, job in ipairs(shard_jobs) do
+			table.insert(jobs, job)
+		end
+	end
+	return jobs
+end
+
+function api.email_outbox_ack(id, owner)
+	local bucket_id = email_outbox_bucket(id)
+	return vshard.router.callrw(
+		bucket_id,
+		"storage_api.email_outbox_ack",
+		{ id, owner },
+		{ timeout = common.read_timeout }
+	)
+end
+
+function api.email_outbox_claim_one(id, owner, now, lease_ms)
+	local bucket_id = email_outbox_bucket(id)
+	return vshard.router.callrw(
+		bucket_id,
+		"storage_api.email_outbox_claim_one",
+		{ id, owner, now, lease_ms },
+		{ timeout = common.read_timeout }
+	)
+end
+
+function api.email_outbox_fail(id, owner, retry_at, max_attempts, last_error, now)
+	local bucket_id = email_outbox_bucket(id)
+	return vshard.router.callrw(
+		bucket_id,
+		"storage_api.email_outbox_fail",
+		{ id, owner, retry_at, max_attempts, last_error, now },
+		{ timeout = common.read_timeout }
+	)
+end
+
 box.schema.func.create("api.bucket_id", { if_not_exists = true })
 box.schema.func.create("api.user_create", { if_not_exists = true })
 box.schema.func.create("api.user_get", { if_not_exists = true })
@@ -441,3 +596,8 @@ box.schema.func.create("api.auth_consume", { if_not_exists = true })
 box.schema.func.create("api.auth_increment", { if_not_exists = true })
 box.schema.func.create("api.auth_delete", { if_not_exists = true })
 box.schema.func.create("api.auth_update_many", { if_not_exists = true })
+box.schema.func.create("api.email_outbox_enqueue", { if_not_exists = true })
+box.schema.func.create("api.email_outbox_claim", { if_not_exists = true })
+box.schema.func.create("api.email_outbox_claim_one", { if_not_exists = true })
+box.schema.func.create("api.email_outbox_ack", { if_not_exists = true })
+box.schema.func.create("api.email_outbox_fail", { if_not_exists = true })

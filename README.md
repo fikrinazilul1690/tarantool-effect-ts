@@ -48,7 +48,10 @@ make reset
 make up
 ```
 
-`make reset` permanently removes only this project's `./data` directory.
+Database files live in the Compose-managed `storage-1-data`, `storage-2-data`,
+`router-data`, and `router-2-data` named volumes rather than the repository.
+`make stop` preserves them. `make reset` permanently removes only these
+project-scoped volumes; take a tested backup before using it on valuable data.
 
 ## Community web UI
 
@@ -217,15 +220,33 @@ disabled, the development server logs the link. For Gmail delivery:
 2. Create an App Password; normal Google passwords are not accepted for SMTP.
 3. Copy `.env.example` to `.env` and set `EMAIL_DELIVERY_ENABLED=true`,
    `SMTP_USER`, `SMTP_PASSWORD`, and `EMAIL_FROM`.
-4. Restart `make api`. Startup verifies the SMTP connection and fails if the
-   credentials or network settings are invalid.
+4. Restart `make api`. SMTP connections are established by the outbox worker;
+   provider outages do not prevent the API from starting or accepting queued
+   verification emails.
 
 For another provider, change `SMTP_HOST`, `SMTP_PORT`, and `SMTP_SECURE`.
 Never commit `.env` or an App Password. A production service should enqueue
 email work instead of waiting for SMTP inside the authentication request.
 
-Create an account; Better Auth sends a verification email and returns no token
-until the recipient verifies it:
+The `email_outbox` vinyl space stores queued jobs on the bucket derived from
+their logical ID. Each API process runs an Effect-scoped worker and claims due
+jobs from every replica set concurrently. Claims are atomic, owner-specific
+leases; an interrupted worker leaves the row recoverable after `EMAIL_LEASE_MS`.
+Delivery concurrency is bounded by `EMAIL_WORKER_CONCURRENCY`. Failures use
+jittered exponential backoff through `EMAIL_RETRY_BASE_MS` and
+`EMAIL_RETRY_MAX_MS`; jobs become `dead` after `EMAIL_MAX_ATTEMPTS`.
+
+`EMAIL_SEND_TIMEOUT_MS` bounds SMTP connection and send latency and must be
+shorter than the lease. `EMAIL_WORKER_BATCH_SIZE` is applied per shard, so size
+worker capacity for `batch size × replica-set count`. SMTP delivery is
+at-least-once: a crash after the provider accepts mail but before acknowledgement
+can produce a duplicate. Dead-letter redrive, retention, provider idempotency,
+and queue metrics remain production checklist items.
+
+Create an account; Better Auth waits only for a durable Tarantool outbox insert
+and returns without waiting for SMTP. An Effect worker leases and delivers the
+email in the background. Sign-up returns no token until the recipient verifies
+the address:
 
 ```bash
 curl -c /tmp/auth-cookies.txt \
@@ -255,14 +276,25 @@ limiter and a durable email outbox to prevent notification abuse and remove
 SMTP from the request path.
 
 The custom adapter stores Better Auth's `user`, `session`, `account`, and
-verification models as maps in the `auth_records` space. Records are sharded
-by the stable hash of `model:id`; queries without an ID fan out through the
-router concurrently. Frequently queried fields (`email`, `token`, `userId`,
-`accountId`, `providerId`, `identifier`, and `expiresAt`) are duplicated into
-nullable tuple fields with compound `(model, value, id)` TREE indexes. The map
-remains the adapter payload, while these columns keep lookups deterministic and
-avoid model-wide Lua filtering. Query limits and offsets are capped at 1,000
-and 10,000 respectively.
+verification models as maps in the `auth_records` space. New records use
+model-aware logical bucket keys: normalized email for users, token for sessions,
+`[providerId, accountId]` for accounts, and identifier for verification rows.
+The router prefixes returned IDs with the selected bucket (`b<bucket>_<id>`),
+so subsequent ID-only reads and writes remain O(1) and rebalance-safe. User
+email, session token, and provider-account indexes are unique on storage; since
+equal logical keys always select the same vshard bucket, those constraints are
+cluster-wide. Verification identifiers intentionally allow multiple values but
+all values for one identifier are co-located for atomic consumption.
+
+Frequently queried fields (`email`, `token`, `userId`, `accountId`,
+`providerId`, `identifier`, and `expiresAt`) are duplicated into nullable tuple
+fields with index-aware query paths. Email routing and comparison trim outer
+whitespace and lowercase the address. Shard-key updates are rejected: email,
+token, provider-account identity, and verification identifier changes require
+an explicit migration rather than silently stranding a record. Non-unique
+multi-row queries, such as listing sessions by `userId`, still scatter to all
+replica sets concurrently. Query limits and offsets are capped at 1,000 and
+10,000 respectively.
 
 The [Tarantool CRUD module](https://github.com/tarantool/crud) is initialized on
 every router and storage. User point operations and the global primary-ID scan
@@ -278,11 +310,13 @@ create cross-shard transactions. Public cursors therefore remain logical
 value-based tokens owned by this application, rather than CRUD or physical
 replica-set state.
 
-Global uniqueness and cross-shard transactions remain separate architectural
-concerns: neither vshard nor CRUD can atomically reserve an email on one bucket
-and create an ID-sharded user on another. Production authentication should use
-a dedicated uniqueness coordinator/registry or choose a sharding key that
-co-locates each required invariant.
+Global uniqueness and cross-record transactions remain separate architectural
+concerns. Model-aware routing now enforces the core uniqueness domains, but the
+custom adapter still declares `transaction: false`: Better Auth creates a user
+and credential account with separate calls that cannot roll back together.
+Production deployment also requires an explicit migration for records created
+by the former `model:id` routing scheme; restarting old data directly does not
+move it to the new canonical buckets.
 
 The application is assembled as an Effect layer graph. `TarantoolDbLive`
 acquires one connection per configured router. During shutdown the HTTP
@@ -472,8 +506,13 @@ blocker still needs implementation and evidence.
 - [ ] Before adding pagination ordered by `age`, `created_at`, or another
       non-unique field, implement and test a `[secondary_value, primary_id]`
       cursor.
-- [ ] Resolve global uniqueness and cross-shard transaction guarantees for
-      Better Auth identities and tokens.
+- [x] Enforce cluster-wide uniqueness for normalized Better Auth user emails,
+      session tokens, and `[providerId, accountId]`, with concurrent race tests.
+- [ ] Provide rollback/reconciliation guarantees for Better Auth workflows that
+      write multiple records, including user plus credential-account signup.
+- [ ] Build a staged migration for legacy `model:id`-sharded auth records,
+      including duplicate preflight, conflict resolution, and canonical-bucket
+      movement before enabling model-aware reads.
 - [ ] Implement and test versioned, rolling schema migrations with rollback or
       forward-fix procedures.
 
@@ -540,8 +579,13 @@ blocker still needs implementation and evidence.
       production telemetry backend.
 - [ ] Add structured logs, distributed traces, dashboards, SLOs, alerts, and
       operational runbooks.
-- [ ] Replace direct SMTP delivery with a durable outbox/queue, idempotent
-      workers, retry limits, and dead-letter handling.
+- [x] Remove SMTP delivery from authentication request latency using a durable,
+      vshard-aware Tarantool outbox with atomic leases, bounded Effect workers,
+      retry limits, jittered exponential backoff, and dead-letter state.
+- [ ] Export outbox depth, lease, attempt, delivery, retry, timeout, and
+      dead-letter metrics; add redrive and retention operations.
+- [ ] Encrypt or minimize verification secrets stored in the outbox and use an
+      SMTP provider idempotency key where supported to reduce duplicate mail.
 - [ ] Add HTTP header/body/concurrency limits and distributed abuse controls.
 - [ ] Pass correctness, race, failover, network-partition, security, load, and
       long-running soak test programs.

@@ -15,7 +15,7 @@ help:
 	@echo "  make api-watch   Start the HTTP API with file watching"
 	@echo "  make test        Run the live Bun smoke test"
 	@echo "  make examples    Run all TypeScript examples"
-	@echo "  make reset       Stop and permanently delete ./data"
+	@echo "  make reset       Stop and permanently delete Docker database volumes"
 
 install:
 	bun install
@@ -66,7 +66,6 @@ storage-2-console:
 
 reset:
 	docker compose down -v
-	rm -rf ./data
 
 examples:
 	bun run example:all
