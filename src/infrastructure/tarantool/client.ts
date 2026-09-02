@@ -1,5 +1,8 @@
 import TarantoolConnection from "tarantool-driver";
 import { Context, Data, Effect, Layer, Schema } from "effect";
+import {AppConfig, defaultTarantoolClientConfig} from '../config';
+
+export {parseRouters} from '../config';
 
 export type TarantoolErrorKind =
   "configuration" | "unavailable" | "overloaded" | "transport" | "response";
@@ -375,7 +378,7 @@ export const makeTarantoolDbLayer = (
         try: async () => {
           let config: TarantoolClientConfig;
           try {
-            config = validateConfig({ ...readConfig(), ...overrides });
+            config = validateConfig({ ...defaultTarantoolClientConfig, ...overrides });
           } catch (cause) {
             throw new TarantoolError({
               operation: "configure",
@@ -455,54 +458,9 @@ export const makeTarantoolDbLayer = (
     ),
   );
 
-export const TarantoolDbLive = makeTarantoolDbLayer();
-
-function readConfig(): TarantoolClientConfig {
-  const fallback = `${process.env.TARANTOOL_HOST ?? "127.0.0.1"}:${process.env.TARANTOOL_PORT ?? "3301"}`;
-  return {
-    routers: parseRouters(process.env.TARANTOOL_ROUTERS ?? fallback),
-    username: process.env.TARANTOOL_USER ?? "app",
-    password: process.env.TARANTOOL_PASSWORD ?? "app-secret",
-    connectTimeoutMs: numberEnv("TARANTOOL_CONNECT_TIMEOUT_MS", 5_000),
-    maxInFlight: numberEnv("TARANTOOL_MAX_IN_FLIGHT", 256),
-    maxInFlightPerRouter: numberEnv("TARANTOOL_MAX_IN_FLIGHT_PER_ROUTER", 128),
-    circuitFailureThreshold: numberEnv(
-      "TARANTOOL_CIRCUIT_FAILURE_THRESHOLD",
-      3,
-    ),
-    circuitResetMs: numberEnv("TARANTOOL_CIRCUIT_RESET_MS", 5_000),
-    operationTimeoutMs: numberEnv("TARANTOOL_OPERATION_TIMEOUT_MS", 4_000),
-    shutdownDrainMs: numberEnv("TARANTOOL_SHUTDOWN_DRAIN_MS", 10_000),
-  };
-}
-
-export function parseRouters(
-  value: string,
-): ReadonlyArray<{ host: string; port: number }> {
-  return value.split(",").map((raw) => {
-    const endpoint = raw.trim();
-    if (endpoint.length === 0)
-      throw new Error("TARANTOOL_ROUTERS contains an empty endpoint");
-    const url = new URL(`tcp://${endpoint}`);
-    if (
-      url.username ||
-      url.password ||
-      (url.pathname !== "" && url.pathname !== "/")
-    ) {
-      throw new Error(`Invalid Tarantool router endpoint: ${endpoint}`);
-    }
-    const port = Number(url.port || 3301);
-    if (!Number.isInteger(port) || port < 1 || port > 65_535) {
-      throw new Error(`Invalid Tarantool router port: ${endpoint}`);
-    }
-    return { host: url.hostname, port };
-  });
-}
-
-function numberEnv(name: string, fallback: number): number {
-  const value = process.env[name];
-  return value === undefined ? fallback : Number(value);
-}
+export const TarantoolDbLive = Layer.unwrap(
+  Effect.map(AppConfig, ({tarantool}) => makeTarantoolDbLayer(tarantool)),
+);
 
 function validateConfig(config: TarantoolClientConfig): TarantoolClientConfig {
   const checks: ReadonlyArray<[number, string, number, number]> = [

@@ -1,6 +1,7 @@
 import {betterAuth} from 'better-auth/minimal';
 import {bearer} from 'better-auth/plugins/bearer';
 import {Context, Effect, Layer} from 'effect';
+import {AppConfig} from '../config';
 import {Email} from '../email/smtp-email';
 import {TarantoolDb} from '../tarantool/client';
 import {tarantoolAdapter} from './tarantool-adapter';
@@ -24,13 +25,14 @@ export const BetterAuthLive = Layer.effect(
   Effect.gen(function*() {
     const db = yield* TarantoolDb;
     const email = yield* Email;
+    const {auth: config} = yield* AppConfig;
     const auth = betterAuth({
       appName: 'Learn Tarantool',
-      baseURL: process.env.BETTER_AUTH_URL ?? 'http://localhost:3000',
+      baseURL: config.baseUrl,
       basePath: '/api/auth',
-      secret: process.env.BETTER_AUTH_SECRET ?? 'development-only-secret-change-me-123456789',
-      trustedOrigins: [process.env.APP_ORIGIN ?? 'http://localhost:3000'],
-      database: tarantoolAdapter(db, {debugLogs: process.env.AUTH_DEBUG === 'true'}),
+      secret: config.secret,
+      trustedOrigins: [config.appOrigin],
+      database: tarantoolAdapter(db, {debugLogs: config.debug}),
       emailAndPassword: {
         enabled: true,
         requireEmailVerification: true,

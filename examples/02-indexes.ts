@@ -1,6 +1,7 @@
 import {BunRuntime} from '@effect/platform-bun';
 import {Effect, Schema} from 'effect';
 import {UserSchema} from '../src/domain/user/model';
+import {AppConfigLive} from '../src/infrastructure/config';
 import {TarantoolDb, TarantoolDbLive} from '../src/infrastructure/tarantool/client';
 
 const program = Effect.gen(function*() {
@@ -13,6 +14,6 @@ const program = Effect.gen(function*() {
     });
   }
   yield* Effect.log(yield* db.call(Schema.Array(UserSchema), 'api.users_by_age', seed, 21, 10));
-}).pipe(Effect.provide(TarantoolDbLive));
+}).pipe(Effect.provide(TarantoolDbLive), Effect.provide(AppConfigLive));
 
 BunRuntime.runMain(program);

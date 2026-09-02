@@ -92,11 +92,12 @@ Read these files in order:
 2. `tarantool/storage.lua` — schema, indexes, CRUD, and transaction logic.
 3. `tarantool/router.lua` — sharding key calculation and `callro`/`callrw`.
 4. `src/domain/user/` — user models and repository contract.
-5. `src/infrastructure/tarantool/` — client and repository implementation.
-6. `src/infrastructure/auth/` — Better Auth and its Tarantool adapter.
-7. `src/presentation/http/` — Effect HttpApi contracts and server layer.
-8. `src/main.ts` — application layer composition and BunRuntime.
-9. `examples/` — application usage from TypeScript.
+5. `src/infrastructure/config.ts` — validated environment configuration service.
+6. `src/infrastructure/tarantool/` — client and repository implementation.
+7. `src/infrastructure/auth/` — Better Auth and its Tarantool adapter.
+8. `src/presentation/http/` — Effect HttpApi contracts and server layer.
+9. `src/main.ts` — application layer composition and BunRuntime.
+10. `examples/` — application usage from TypeScript.
 
 See [`docs/TARANTOOL_CLIENT.md`](docs/TARANTOOL_CLIENT.md) for the complete
 availability, retry, deadline, metrics, and lifecycle design. The running
@@ -229,6 +230,7 @@ until the recipient verifies it:
 ```bash
 curl -c /tmp/auth-cookies.txt \
   -H 'content-type: application/json' \
+  -H 'origin: http://localhost:3000' \
   -d '{"name":"Ada","email":"ada@example.com","password":"secure-password-123"}' \
   http://localhost:3000/api/auth/sign-up/email
 
@@ -237,6 +239,11 @@ curl -c /tmp/auth-cookies.txt \
 
 Sign in later with `POST /api/auth/sign-in/email` using the same `email` and
 `password` fields. Set `AUTH_DEBUG=true` when troubleshooting adapter calls.
+Browser clients send `Origin` automatically. Non-browser clients that retain
+cookies, including Postman and curl cookie jars, must send an `Origin` matching
+`APP_ORIGIN`; Better Auth rejects a missing origin to prevent CSRF. Do not work
+around `MISSING_OR_NULL_ORIGIN` by disabling Better Auth's origin or CSRF
+checks.
 
 The custom adapter stores Better Auth's `user`, `session`, `account`, and
 verification models as maps in the `auth_records` space. Records are sharded
@@ -305,6 +312,7 @@ can put data on the wrong shard.
 import {BunRuntime} from '@effect/platform-bun';
 import {Effect} from 'effect';
 import type {User} from './src/domain/user/model';
+import {AppConfigLive} from './src/infrastructure/config';
 import {TarantoolDb, TarantoolDbLive} from './src/infrastructure/tarantool/client';
 
 const program = Effect.gen(function*() {
@@ -318,7 +326,7 @@ const program = Effect.gen(function*() {
 
   const readBack = yield* db.call<User | null>('api.user_get', user.id);
   yield* Effect.log(readBack);
-}).pipe(Effect.provide(TarantoolDbLive));
+}).pipe(Effect.provide(TarantoolDbLive), Effect.provide(AppConfigLive));
 
 BunRuntime.runMain(program);
 ```
@@ -365,8 +373,14 @@ ID (including during bucket movement), sorts, and returns one page. Configure
 replica `zone` values and the vshard `weights` distance matrix in multi-DC
 deployments; `replicaset:callro` then selects the nearest available node.
 
-Configuration defaults are in `.env.example`. Bun automatically reads a local
-`.env`, so copy it when you want to override the connection values.
+Configuration defaults are documented in `.env.example`. Bun loads a local
+`.env`, then `AppConfigLive` evaluates an Effect `Config` description once
+during layer startup. `Config.schema` and Effect Schema trim and transform
+strings into URLs, booleans, ports, and bounded integers; the final application
+schema validates router endpoints, SMTP requirements, and cross-service
+deadline ordering. The resulting immutable snapshot is shared by Tarantool,
+HTTP, Better Auth, and SMTP. Invalid input fails through the typed `ConfigError`
+channel before the application begins accepting traffic.
 
 ## Why queries look different in a sharded database
 

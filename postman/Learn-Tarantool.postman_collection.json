@@ -104,6 +104,17 @@
     {
       "name": "Auth",
       "description": "Postman automatically stores the better-auth.session_token cookie returned by sign-up/sign-in.",
+      "event": [
+        {
+          "listen": "prerequest",
+          "script": {
+            "exec": [
+              "// Better Auth requires an Origin/Referer when a retained cookie is sent.",
+              "pm.request.headers.upsert({ key: 'Origin', value: pm.variables.get('baseUrl') });"
+            ]
+          }
+        }
+      ],
       "item": [
         {
           "name": "Sign Up with Email",

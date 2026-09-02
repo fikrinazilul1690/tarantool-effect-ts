@@ -128,6 +128,11 @@ Lua procedures must also remain bounded and cooperative.
 
 ## Effect lifecycle
 
+`AppConfigLive` evaluates Effect `Config` from the active `ConfigProvider` and
+validates it with Effect Schema once at composition time. This keeps production
+environment loading and deterministic in-memory test providers behind the same
+service boundary.
+`TarantoolDbLive` consumes its Tarantool section, and
 `makeTarantoolDbLayer()` constructs the service with `Effect.acquireRelease`:
 
 - acquire and validate configuration;
@@ -209,7 +214,10 @@ HTTP_GRACEFUL_SHUTDOWN_MS=15000
 
 `TARANTOOL_HOST` and `TARANTOOL_PORT` are compatibility fallbacks used only
 when `TARANTOOL_ROUTERS` is absent. Production should configure at least two
-router endpoints.
+router endpoints. HTTP, authentication, and SMTP configuration is supplied by
+the same `AppConfig` service, including cross-service validation that the
+database deadline precedes the HTTP deadline and database drain precedes HTTP
+graceful shutdown.
 
 ## Driver type compatibility
 

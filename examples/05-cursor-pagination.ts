@@ -1,6 +1,7 @@
 import {BunRuntime} from '@effect/platform-bun';
 import {Effect} from 'effect';
 import {UserCursorPageSchema, UserSchema, type UserCursorPage} from '../src/domain/user/model';
+import {AppConfigLive} from '../src/infrastructure/config';
 import {TarantoolDb, TarantoolDbLive} from '../src/infrastructure/tarantool/client';
 
 const program = Effect.gen(function*() {
@@ -21,6 +22,6 @@ const program = Effect.gen(function*() {
     cursor = page.next_cursor;
     pageNumber += 1;
   } while (cursor !== null);
-}).pipe(Effect.provide(TarantoolDbLive));
+}).pipe(Effect.provide(TarantoolDbLive), Effect.provide(AppConfigLive));
 
 BunRuntime.runMain(program);

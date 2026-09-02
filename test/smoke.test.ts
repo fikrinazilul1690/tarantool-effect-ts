@@ -1,6 +1,7 @@
 import {expect, test} from 'bun:test';
 import {Effect, Schema} from 'effect';
 import {UserCursorPageSchema, UserSchema, type UserCursorPage} from '../src/domain/user/model';
+import {AppConfigLive} from '../src/infrastructure/config';
 import {
   TarantoolDb,
   TarantoolDbLive,
@@ -10,7 +11,10 @@ import {
 } from '../src/infrastructure/tarantool/client';
 
 const runDb = <A, E>(effect: Effect.Effect<A, E, TarantoolDb>) =>
-  Effect.runPromise(effect.pipe(Effect.provide(TarantoolDbLive)));
+  Effect.runPromise(effect.pipe(
+    Effect.provide(TarantoolDbLive),
+    Effect.provide(AppConfigLive),
+  ));
 
 test('CRUD travels through the vshard router', () => runDb(Effect.gen(function*() {
   const db = yield* TarantoolDb;

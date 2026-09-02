@@ -1,6 +1,7 @@
 import {BunRuntime} from '@effect/platform-bun';
 import {Layer} from 'effect';
 import {BetterAuthLive} from './infrastructure/auth/better-auth';
+import {AppConfigLive} from './infrastructure/config';
 import {EmailLive} from './infrastructure/email/smtp-email';
 import {TarantoolDbLive} from './infrastructure/tarantool/client';
 import {TarantoolUserRepositoryLive} from './infrastructure/tarantool/user-repository';
@@ -16,6 +17,7 @@ const InfrastructureLive = Layer.mergeAll(
 
 const ApplicationLive = HttpServerLive.pipe(
   Layer.provide(InfrastructureLive),
+  Layer.provide(AppConfigLive),
 );
 
 Layer.launch(ApplicationLive).pipe(BunRuntime.runMain);

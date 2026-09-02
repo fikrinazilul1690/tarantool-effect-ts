@@ -1,5 +1,6 @@
 import {Context, Data, Effect, Layer} from 'effect';
 import nodemailer, {type Transporter} from 'nodemailer';
+import {AppConfig, type AppConfigShape} from '../config';
 
 export class EmailError extends Data.TaggedError('EmailError')<{
   readonly operation: 'configure' | 'verify' | 'send';
@@ -18,22 +19,17 @@ interface EmailShape {
 
 export class Email extends Context.Service<Email, EmailShape>()('learn-tarantool/Email') {}
 
-const deliveryEnabled = process.env.EMAIL_DELIVERY_ENABLED === 'true';
-
-const acquireTransport = Effect.acquireRelease(
+const acquireTransport = (config: AppConfigShape['email']) => Effect.acquireRelease(
   Effect.tryPromise({
     try: async (): Promise<Transporter | null> => {
-      if (!deliveryEnabled) return null;
-      const host = process.env.SMTP_HOST;
-      const user = process.env.SMTP_USER;
-      const pass = process.env.SMTP_PASSWORD;
-      if (!host || !user || !pass || !process.env.EMAIL_FROM) {
-        throw new Error('SMTP_HOST, SMTP_USER, SMTP_PASSWORD, and EMAIL_FROM are required');
-      }
+      if (!config.deliveryEnabled) return null;
+      const host = config.host!;
+      const user = config.user!;
+      const pass = config.password!;
       const transporter = nodemailer.createTransport({
         host,
-        port: Number(process.env.SMTP_PORT ?? 587),
-        secure: process.env.SMTP_SECURE === 'true',
+        port: config.port,
+        secure: config.secure,
         auth: {user, pass},
       });
       await transporter.verify();
@@ -47,7 +43,8 @@ const acquireTransport = Effect.acquireRelease(
 export const EmailLive = Layer.effect(
   Email,
   Effect.gen(function*() {
-    const transporter = yield* acquireTransport;
+    const {email: config} = yield* AppConfig;
+    const transporter = yield* acquireTransport(config);
     const sendVerification = (message: VerificationEmail): Effect.Effect<void, EmailError> => {
       if (transporter === null) {
         return Effect.logWarning(
@@ -56,7 +53,7 @@ export const EmailLive = Layer.effect(
       }
       return Effect.tryPromise({
         try: () => transporter.sendMail({
-          from: process.env.EMAIL_FROM!,
+          from: config.from!,
           to: message.to,
           subject: 'Verify your Learn Tarantool email address',
           text: `Hello ${message.name},\n\nVerify your email address:\n${message.verificationUrl}\n\nThis link expires in one hour.`,

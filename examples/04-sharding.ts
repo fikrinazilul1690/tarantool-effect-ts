@@ -1,6 +1,7 @@
 import {BunRuntime} from '@effect/platform-bun';
 import {Effect, Schema} from 'effect';
 import {ClusterInfoSchema} from '../src/domain/cluster/model';
+import {AppConfigLive} from '../src/infrastructure/config';
 import {TarantoolDb, TarantoolDbLive} from '../src/infrastructure/tarantool/client';
 
 const program = Effect.gen(function*() {
@@ -11,6 +12,6 @@ const program = Effect.gen(function*() {
   const info = yield* db.call(ClusterInfoSchema, 'api.cluster_info');
   yield* Effect.sync(() => console.dir(info, {depth: 6}));
   yield* Effect.log('The client knows only the router; vshard maps buckets to storage replica sets.');
-}).pipe(Effect.provide(TarantoolDbLive));
+}).pipe(Effect.provide(TarantoolDbLive), Effect.provide(AppConfigLive));
 
 BunRuntime.runMain(program);
