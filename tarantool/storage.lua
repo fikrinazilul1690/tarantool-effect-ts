@@ -1,7 +1,8 @@
 -- Keep vshard global: its registered remote procedures are resolved by names
 -- such as "vshard.storage.bucket_stat" through Tarantool's global namespace.
 vshard = require('vshard')
-local common = require('config')
+local common = require('cluster_config')
+local crud = require('crud')
 
 local instance_uuid = assert(os.getenv('INSTANCE_UUID'), 'INSTANCE_UUID is required')
 local replicaset_uuid = assert(os.getenv('REPLICASET_UUID'), 'REPLICASET_UUID is required')
@@ -18,6 +19,22 @@ local cfg = {
 }
 
 vshard.storage.cfg(cfg, instance_uuid)
+if not box.info.ro then box.schema.upgrade() end
+
+-- CRUD preserves the authenticated router user when it invokes storage-side
+-- functions. Provision the application principal on every storage so those
+-- calls are authorized after routing; the storage endpoints remain private.
+if not box.info.ro then
+    box.once('storage-app-user-v1', function()
+        box.schema.user.create('app', {password = 'app-secret', if_not_exists = true})
+        box.schema.user.grant('app', 'read,write,execute', 'universe', nil,
+            {if_not_exists = true})
+    end)
+end
+
+local function nullable(value)
+    return value == nil and box.NULL or value
+end
 
 box.once('schema-v1', function()
     box.schema.user.create('storage', {password = 'storage-secret', if_not_exists = true})
@@ -59,6 +76,90 @@ box.once('better-auth-schema-v1', function()
     records:create_index('model', {parts = {{field = 'model', type = 'string'}}, unique = false, if_not_exists = true})
 end)
 
+box.once('better-auth-indexes-v2', function()
+    box.space.auth_records:format({
+        {name = 'key', type = 'string'},
+        {name = 'bucket_id', type = 'unsigned'},
+        {name = 'model', type = 'string'},
+        {name = 'id', type = 'string'},
+        {name = 'data', type = 'map'},
+        {name = 'email', type = 'string', is_nullable = true},
+        {name = 'token', type = 'string', is_nullable = true},
+        {name = 'userId', type = 'string', is_nullable = true},
+        {name = 'accountId', type = 'string', is_nullable = true},
+        {name = 'providerId', type = 'string', is_nullable = true},
+        {name = 'identifier', type = 'string', is_nullable = true},
+        {name = 'expiresAt', type = 'scalar', is_nullable = true},
+    })
+    for _, tuple in box.space.auth_records.index.primary:pairs() do
+        local data = tuple.data
+        box.space.auth_records:replace({
+            tuple.key, tuple.bucket_id, tuple.model, tuple.id, data,
+            nullable(data.email), nullable(data.token), nullable(data.userId),
+            nullable(data.accountId), nullable(data.providerId),
+            nullable(data.identifier), nullable(data.expiresAt),
+        })
+    end
+    for _, field in ipairs({'email', 'token', 'userId', 'accountId',
+        'providerId', 'identifier', 'expiresAt'}) do
+        box.space.auth_records:create_index('model_' .. field, {
+            parts = {
+                {field = 'model', type = 'string'},
+                {field = field, type = field == 'expiresAt' and 'scalar' or 'string',
+                    is_nullable = true},
+                {field = 'id', type = 'string'},
+            },
+            unique = false,
+            if_not_exists = true,
+        })
+    end
+end)
+
+box.once('users-counter-v1', function()
+    local counters = box.schema.space.create('counters', {
+        if_not_exists = true,
+        engine = 'memtx',
+        format = {
+            {name = 'name', type = 'string'},
+            {name = 'value', type = 'integer'},
+        },
+    })
+    counters:create_index('primary', {
+        parts = {{field = 'name', type = 'string'}},
+        if_not_exists = true,
+    })
+    -- One bounded migration scan initializes existing installations. Steady
+    -- state never calls len()/count() and is safe if users later moves to vinyl.
+    local total = 0
+    for _ in box.space.users.index.primary:pairs() do total = total + 1 end
+    counters:replace({'users', total})
+end)
+
+box.once('users-bucket-age-index-v1', function()
+    box.space.users:create_index('bucket_age', {
+        parts = {
+            {field = 'bucket_id', type = 'unsigned'},
+            {field = 'age', type = 'unsigned'},
+            {field = 'id', type = 'unsigned'},
+        },
+        unique = true,
+        if_not_exists = true,
+    })
+end)
+
+-- vshard tuple moves also execute on_replace, so each storage's O(1) counter
+-- remains correct as buckets enter or leave during rebalancing.
+box.space.users:on_replace(function(old, new)
+    -- The master's counter mutation is replicated in the same WAL transaction;
+    -- do not apply it a second time while replaying that transaction.
+    if box.session.type() == 'applier' then return end
+    if old == nil and new ~= nil then
+        box.space.counters:update({'users'}, {{'+', 'value', 1}})
+    elseif old ~= nil and new == nil then
+        box.space.counters:update({'users'}, {{'-', 'value', 1}})
+    end
+end)
+
 local function ensure_bucket(bucket_id)
     if type(bucket_id) ~= 'number' then error('bucket_id must be a number') end
 end
@@ -67,10 +168,12 @@ storage_api = {}
 
 function storage_api.user_create(user)
     ensure_bucket(user.bucket_id)
-    local tuple = box.space.users:insert({
-        user.id, user.bucket_id, user.email, user.name, user.age, user.created_at,
-    })
-    return tuple:tomap({names_only = true})
+    return box.atomic(function()
+        local tuple = box.space.users:insert({
+            user.id, user.bucket_id, user.email, user.name, user.age, user.created_at,
+        })
+        return tuple:tomap({names_only = true})
+    end)
 end
 
 function storage_api.user_get(bucket_id, id)
@@ -94,53 +197,42 @@ end
 
 function storage_api.user_delete(bucket_id, id)
     ensure_bucket(bucket_id)
-    local current = box.space.users:get({id})
-    if current == nil or current.bucket_id ~= bucket_id then return nil end
-    return box.space.users:delete({id}):tomap({names_only = true})
+    return box.atomic(function()
+        local current = box.space.users:get({id})
+        if current == nil or current.bucket_id ~= bucket_id then return nil end
+        return box.space.users:delete({id}):tomap({names_only = true})
+    end)
 end
 
 function storage_api.users_by_age(bucket_id, minimum_age, limit)
     ensure_bucket(bucket_id)
     local result = {}
-    for _, tuple in box.space.users.index.age:pairs({minimum_age}, {iterator = 'GE'}) do
-        if tuple.bucket_id == bucket_id then
-            table.insert(result, tuple:tomap({names_only = true}))
-            if #result >= (limit or 20) then break end
-        end
+    for _, tuple in box.space.users.index.bucket_age:pairs(
+        {bucket_id, minimum_age}, {iterator = 'GE'}) do
+        if tuple.bucket_id ~= bucket_id then break end
+        table.insert(result, tuple:tomap({names_only = true}))
+        if #result >= (limit or 20) then break end
     end
     return result
 end
 
--- Return one native Tarantool index page. `position` is the opaque base64
--- value previously returned by fetch_pos; box.NULL starts at the beginning.
-function storage_api.users_fetch_page(position, limit)
-    local after = position
-    if after == nil or after == box.NULL or after == '' then after = box.NULL end
-
-    local tuples, next_position = box.space.users.index.primary:select({}, {
-        iterator = 'ALL',
+function storage_api.users_page_fragment(last_id, limit)
+    local tuples = box.space.users.index.primary:select({last_id}, {
+        iterator = 'GT',
         limit = limit,
-        after = after,
-        fetch_pos = true,
     })
     local items = {}
     for index, tuple in ipairs(tuples) do
         items[index] = tuple:tomap({names_only = true})
     end
-
-    -- Probe without advancing the returned position, so an exact-size final
-    -- page can still report has_more accurately.
-    local has_more = false
-    if next_position ~= nil then
-        has_more = #box.space.users.index.primary:select({}, {
-            iterator = 'ALL', limit = 1, after = next_position,
-        }) > 0
-    end
     return {
         items = items,
-        position = next_position or box.NULL,
-        has_more = has_more,
+        total = box.space.counters:get({'users'}).value,
     }
+end
+
+function storage_api.users_total()
+    return box.space.counters:get({'users'}).value
 end
 
 function storage_api.transfer_age(bucket_id, first_id, second_id, amount)
@@ -165,10 +257,6 @@ end
 function storage_api.count(bucket_id)
     ensure_bucket(bucket_id)
     return box.space.users.index.bucket_id:count({bucket_id})
-end
-
-function storage_api.users_total()
-    return box.space.users:len()
 end
 
 local function compare(actual, condition)
@@ -210,21 +298,117 @@ end
 
 function storage_api.auth_create(model, data, bucket_id)
     local key = model .. ':' .. data.id
-    box.space.auth_records:insert({key, bucket_id, model, data.id, data})
+    box.space.auth_records:insert({
+        key, bucket_id, model, data.id, data,
+        nullable(data.email), nullable(data.token), nullable(data.userId),
+        nullable(data.accountId), nullable(data.providerId),
+        nullable(data.identifier), nullable(data.expiresAt),
+    })
     return data
 end
 
-function storage_api.auth_find(model, where)
+local auth_indexes = {
+    email = 'model_email',
+    token = 'model_token',
+    userId = 'model_userId',
+    accountId = 'model_accountId',
+    providerId = 'model_providerId',
+    identifier = 'model_identifier',
+    expiresAt = 'model_expiresAt',
+}
+
+local auth_iterators = {
+    eq = 'EQ',
+    lt = 'LT',
+    lte = 'LE',
+    gt = 'GT',
+    gte = 'GE',
+}
+
+local function model_bounded_pairs(index, model, key, iterator)
+    local gen, param, state = index:pairs(key, {iterator = iterator})
+    return function(inner_param, inner_state)
+        local next_state, tuple = gen(inner_param, inner_state)
+        if tuple == nil or tuple.model ~= model then return nil end
+        return next_state, tuple
+    end, param, state
+end
+
+local function auth_scan(model, where, sort_by)
+    for index, condition in ipairs(where or {}) do
+        if index > 1 and condition.connector == 'OR' then
+            error('OR auth queries require a dedicated union query plan')
+        end
+    end
+    if where ~= nil then
+        for _, condition in ipairs(where) do
+            if condition.field == 'id' and (condition.operator == nil or condition.operator == 'eq') then
+                local tuple = box.space.auth_records:get({model .. ':' .. condition.value})
+                return function(_, state)
+                    if state or tuple == nil then return nil end
+                    return true, tuple
+                end, nil, false
+            end
+        end
+    end
+
+    if sort_by ~= nil and sort_by ~= box.NULL and auth_indexes[sort_by.field] ~= nil then
+        return model_bounded_pairs(
+            box.space.auth_records.index[auth_indexes[sort_by.field]],
+            model, {model}, sort_by.direction == 'desc' and 'REQ' or 'EQ')
+    end
+    if where ~= nil then
+        for _, condition in ipairs(where) do
+            local iterator = auth_iterators[condition.operator or 'eq']
+            if auth_indexes[condition.field] ~= nil and iterator ~= nil then
+                return model_bounded_pairs(
+                    box.space.auth_records.index[auth_indexes[condition.field]],
+                    model, {model, condition.value}, iterator)
+            end
+        end
+    end
+    if where ~= nil and #where > 0 then
+        error('auth query has no usable index')
+    end
+    return box.space.auth_records.index.model:pairs({model}, {iterator = 'EQ'})
+end
+
+function storage_api.auth_find(model, where, limit, sort_by)
     local result = {}
-    for _, tuple in box.space.auth_records.index.model:pairs({model}, {iterator = 'EQ'}) do
-        if matches(tuple.data, where) then table.insert(result, tuple.data) end
+    local scanned = 0
+    for _, tuple in auth_scan(model, where, sort_by) do
+        if matches(tuple.data, where) then
+            table.insert(result, tuple.data)
+            if limit ~= nil and limit ~= box.NULL and #result >= limit then break end
+        end
+        scanned = scanned + 1
+        if scanned % 1000 == 0 then require('fiber').yield() end
     end
     return result
 end
 
+function storage_api.auth_count(model, where)
+    local total, scanned = 0, 0
+    for _, tuple in auth_scan(model, where, box.NULL) do
+        if matches(tuple.data, where) then total = total + 1 end
+        scanned = scanned + 1
+        if scanned % 1000 == 0 then require('fiber').yield() end
+    end
+    return total
+end
+
+local function replace_auth_data(tuple, data)
+    box.space.auth_records:replace({
+        tuple.key, tuple.bucket_id, tuple.model, tuple.id, data,
+        nullable(data.email), nullable(data.token), nullable(data.userId),
+        nullable(data.accountId), nullable(data.providerId),
+        nullable(data.identifier), nullable(data.expiresAt),
+    })
+end
+
 function storage_api.auth_update_one(model, where, changes, consume, increments)
     return box.atomic(function()
-        for _, tuple in box.space.auth_records.index.model:pairs({model}, {iterator = 'EQ'}) do
+        for _, tuple in auth_scan(model, where, box.NULL) do
             if matches(tuple.data, where) then
                 local data = tuple.data
                 if consume then
@@ -233,7 +417,7 @@ function storage_api.auth_update_one(model, where, changes, consume, increments)
                 end
                 for field, value in pairs(changes or {}) do data[field] = value end
                 for field, delta in pairs(increments or {}) do data[field] = (data[field] or 0) + delta end
-                box.space.auth_records:update({tuple.key}, {{'=', 'data', data}})
+                replace_auth_data(tuple, data)
                 return data
             end
         end
@@ -244,7 +428,7 @@ end
 function storage_api.auth_update_many(model, where, changes, remove)
     return box.atomic(function()
         local keys = {}
-        for _, tuple in box.space.auth_records.index.model:pairs({model}, {iterator = 'EQ'}) do
+        for _, tuple in auth_scan(model, where, box.NULL) do
             if matches(tuple.data, where) then table.insert(keys, tuple.key) end
         end
         for _, key in ipairs(keys) do
@@ -254,7 +438,7 @@ function storage_api.auth_update_many(model, where, changes, remove)
                 local tuple = box.space.auth_records:get({key})
                 local data = tuple.data
                 for field, value in pairs(changes or {}) do data[field] = value end
-                box.space.auth_records:update({key}, {{'=', 'data', data}})
+                replace_auth_data(tuple, data)
             end
         end
         return #keys
@@ -266,11 +450,16 @@ box.schema.func.create('storage_api.user_get', {if_not_exists = true})
 box.schema.func.create('storage_api.user_update', {if_not_exists = true})
 box.schema.func.create('storage_api.user_delete', {if_not_exists = true})
 box.schema.func.create('storage_api.users_by_age', {if_not_exists = true})
-box.schema.func.create('storage_api.users_fetch_page', {if_not_exists = true})
+box.schema.func.create('storage_api.users_page_fragment', {if_not_exists = true})
 box.schema.func.create('storage_api.users_total', {if_not_exists = true})
 box.schema.func.create('storage_api.transfer_age', {if_not_exists = true})
 box.schema.func.create('storage_api.count', {if_not_exists = true})
 box.schema.func.create('storage_api.auth_create', {if_not_exists = true})
 box.schema.func.create('storage_api.auth_find', {if_not_exists = true})
+box.schema.func.create('storage_api.auth_count', {if_not_exists = true})
 box.schema.func.create('storage_api.auth_update_one', {if_not_exists = true})
 box.schema.func.create('storage_api.auth_update_many', {if_not_exists = true})
+
+-- Initialize after application spaces and formats exist so CRUD can publish a
+-- consistent schema and install its rebalance-safe storage procedures.
+crud.init_storage({async = false})

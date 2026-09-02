@@ -11,6 +11,7 @@ import {
   HealthSuccess,
   InternalErrorResponse,
   ListUsersSuccess,
+  MetricsSuccess,
 } from "./schemas";
 
 export class SystemApi extends HttpApiGroup.make("system", {
@@ -18,6 +19,10 @@ export class SystemApi extends HttpApiGroup.make("system", {
 }).add(
   HttpApiEndpoint.get("health", "/health", {
     success: HealthSuccess,
+  }),
+).add(
+  HttpApiEndpoint.get("metrics", "/metrics", {
+    success: MetricsSuccess,
   }),
 ) { }
 

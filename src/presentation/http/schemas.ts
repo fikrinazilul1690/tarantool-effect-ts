@@ -18,6 +18,20 @@ export const HealthSuccess = SuccessResponse(Schema.Struct({
   runtime: Schema.String,
 }));
 
+export const MetricsSuccess = SuccessResponse(Schema.Struct({
+  routers: Schema.Array(Schema.Struct({
+    endpoint: Schema.String,
+    state: Schema.Literals(['closed', 'open', 'half-open']),
+    inFlight: Schema.Number,
+    consecutiveFailures: Schema.Number,
+    retryAt: Schema.NullOr(Schema.Number),
+    requests: Schema.Number,
+    failures: Schema.Number,
+    rejections: Schema.Number,
+    reconnects: Schema.Number,
+  })),
+}));
+
 export const ListUsersSuccess = SuccessResponse(CursorPageSchema);
 
 const ErrorResponse = <C extends string>(code: C) => Schema.Struct({

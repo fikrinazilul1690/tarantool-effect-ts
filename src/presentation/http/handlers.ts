@@ -1,19 +1,23 @@
 import { Effect } from "effect";
 import { HttpApiBuilder } from "effect/unstable/httpapi";
 import { UserRepository } from "../../domain/user/repository";
+import { TarantoolDb } from "../../infrastructure/tarantool/client";
 import { Api } from "./api";
-import { HealthSuccess, ListUsersSuccess, errorResponse } from "./schemas";
+import { HealthSuccess, ListUsersSuccess, MetricsSuccess, errorResponse } from "./schemas";
 
-export const SystemHandlers = HttpApiBuilder.group(Api, "system", (handlers) =>
-  handlers.handle("health", () =>
+export const SystemHandlers = HttpApiBuilder.group(Api, "system", Effect.fn(function* (handlers) {
+  const db = yield* TarantoolDb;
+  return handlers.handle("health", () =>
     Effect.succeed(HealthSuccess.make({
       data: {
         status: "ok" as const,
         runtime: "Effect v4 HttpApi + BunPlatform",
       },
     })),
-  ),
-);
+  ).handle("metrics", () => db.status.pipe(
+    Effect.map((routers) => MetricsSuccess.make({data: {routers: [...routers]}})),
+  ));
+}));
 
 export const UsersHandlers = HttpApiBuilder.group(
   Api,

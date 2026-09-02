@@ -90,7 +90,7 @@
                 {"key": "cursor", "value": "{{nextCursor}}"}
               ]
             },
-            "description": "Uses the opaque fetch_pos cursor saved by the first-page request."
+            "description": "Uses the logical ID cursor saved by the first-page request."
           },
           "event": [{"listen": "test", "script": {"exec": [
             "pm.test('status is 200', () => pm.response.to.have.status(200));",

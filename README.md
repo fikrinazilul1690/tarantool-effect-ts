@@ -1,12 +1,12 @@
 # Learn Tarantool with vshard, Bun, and TypeScript
 
-This is a runnable learning project, not a production cluster. It contains one
-stateless vshard router and two independent storage replica sets (one instance
-each). The Bun application connects only to the router on port `3301`.
+This is a runnable learning project, not a production cluster. It contains two
+stateless vshard routers and two independent storage replica sets (one instance
+each). The Bun application selects between router ports `3301` and `3304`.
 
 ```text
-Bun/TypeScript -> router :3301 -> bucket -> storage-1 :3302
-                                    `-----> storage-2 :3303
+Bun/TypeScript -> routers :3301/:3304 -> bucket -> storage-1 :3302
+                                               `-----> storage-2 :3303
 Community UI :8000 ------------------------^       ^
 ```
 
@@ -20,9 +20,10 @@ rebalancing much finer-grained than sharding directly by physical server.
 - Docker with Compose v2
 - [Bun](https://bun.sh/) 1.x
 
-The project pins Tarantool 2.11.8 because its classic Lua application model is
-small and especially good for learning vshard. The binary protocol remains
-compatible with Tarantool 3.x. The Node connector is community-supported, so
+The project runs Tarantool 3.8.0 with CRUD 1.7.5, vshard 0.1.42, checks 3.4.1,
+and errors 2.2.1. The rocks are installed at exact release versions in the
+image instead of resolving mutable `scm` dependencies. The Node connector is
+community-supported, so
 `src/infrastructure/tarantool/client.ts` keeps it behind a typed Effect service.
 
 ## Start here
@@ -36,7 +37,7 @@ bun run example:all
 bun test
 ```
 
-The selected official image includes the vshard rock. The first image download can take a few minutes.
+The image build installs the pinned CRUD stack. The first build can take a few minutes.
 Follow startup with `docker compose logs -f`. Stop the cluster with
 `docker compose down`.
 
@@ -62,6 +63,7 @@ the UI backend runs inside Compose:
 | Name | Host | Port | User | Password |
 | --- | --- | --- | --- | --- |
 | Router | `router` | `3301` | `app` | `app-secret` |
+| Router 2 | `router-2` | `3301` | `app` | `app-secret` |
 | Storage 1 | `storage-1` | `3301` | `storage` | `storage-secret` |
 | Storage 2 | `storage-2` | `3301` | `storage` | `storage-secret` |
 
@@ -86,7 +88,7 @@ reverse proxy.
 
 Read these files in order:
 
-1. `tarantool/config.lua` — bucket count and topology.
+1. `tarantool/cluster_config.lua` — bucket count and topology.
 2. `tarantool/storage.lua` — schema, indexes, CRUD, and transaction logic.
 3. `tarantool/router.lua` — sharding key calculation and `callro`/`callrw`.
 4. `src/domain/user/` — user models and repository contract.
@@ -96,9 +98,16 @@ Read these files in order:
 8. `src/main.ts` — application layer composition and BunRuntime.
 9. `examples/` — application usage from TypeScript.
 
-See `docs/TARANTOOL_POOL.md` for an optional Effect-managed connection pool
-design. The running project intentionally keeps one shared multiplexed
-connection until benchmarks justify additional sockets.
+See [`docs/TARANTOOL_CLIENT.md`](docs/TARANTOOL_CLIENT.md) for the complete
+availability, retry, deadline, metrics, and lifecycle design. The running
+client keeps one multiplexed
+connection per configured router and applies bounded concurrency, load
+shedding, circuit breaking, and least-loaded router selection.
+
+For the complete risk register, target architecture, remediation requirements,
+test program, and release checklist, read
+[`docs/PRODUCTION_READINESS.md`](docs/PRODUCTION_READINESS.md). Passing the
+smoke tests does not make this learning topology production-ready.
 
 ## Effect v4 HTTP API and Better Auth
 
@@ -115,8 +124,9 @@ The API listens on `http://localhost:3000`:
 | Route | Purpose |
 | --- | --- |
 | `GET /health` | Effect server health check |
+| `GET /metrics` | Tarantool pool saturation, failures, rejections, reconnects, and circuits |
 | `GET /openapi.json` | OpenAPI 3.1 generated from Effect schemas |
-| `GET /api/users?limit=20&cursor=...` | Bearer-protected user objects with a `fetch_pos` cursor |
+| `GET /api/users?limit=20&cursor=...` | Bearer-protected user objects with a logical ID cursor |
 | `/api/auth/*` | Better Auth endpoints |
 
 Public Effect API responses use a consistent envelope:
@@ -231,17 +241,42 @@ Sign in later with `POST /api/auth/sign-in/email` using the same `email` and
 The custom adapter stores Better Auth's `user`, `session`, `account`, and
 verification models as maps in the `auth_records` space. Records are sharded
 by the stable hash of `model:id`; queries without an ID fan out through the
-router. The learning adapter implements create, find, count, update, delete,
-atomic consume, and atomic increment operations. It does not provide global
-unique indexes or cross-shard transactions, so add dedicated unique lookup
-spaces and production-grade replica sets before using this design in a real
-authentication system.
+router concurrently. Frequently queried fields (`email`, `token`, `userId`,
+`accountId`, `providerId`, `identifier`, and `expiresAt`) are duplicated into
+nullable tuple fields with compound `(model, value, id)` TREE indexes. The map
+remains the adapter payload, while these columns keep lookups deterministic and
+avoid model-wide Lua filtering. Query limits and offsets are capped at 1,000
+and 10,000 respectively.
+
+The [Tarantool CRUD module](https://github.com/tarantool/crud) is initialized on
+every router and storage. User point operations and the global primary-ID scan
+use CRUD for routing, schema discovery, yielding, replica preferences, and
+rebalance-aware scatter/merge. Exact counters remain custom: a storage
+`on_replace` trigger updates each shard's counter in the same transaction, and
+the router reads those counters concurrently. Better Auth also remains custom
+because its map payload needs normalized compound indexes and operation-aware
+transaction paths that generic CRUD does not provide.
+
+CRUD does not make nested map fields indexable, provide global uniqueness, or
+create cross-shard transactions. Public cursors therefore remain logical
+value-based tokens owned by this application, rather than CRUD or physical
+replica-set state.
+
+Global uniqueness and cross-shard transactions remain separate architectural
+concerns: neither vshard nor CRUD can atomically reserve an email on one bucket
+and create an ID-sharded user on another. Production authentication should use
+a dedicated uniqueness coordinator/registry or choose a sharding key that
+co-locates each required invariant.
 
 The application is assembled as an Effect layer graph. `TarantoolDbLive`
-acquires one connection when the application scope starts and disconnects it
-during graceful shutdown. `BetterAuthLive` depends on that database service,
+acquires one connection per configured router. During shutdown the HTTP
+listener drains first; the pool rejects new work, waits up to
+`TARANTOOL_SHUTDOWN_DRAIN_MS`, and then closes every connection.
+`BetterAuthLive` depends on that database service,
 and the HTTP routes depend on both services. `BunHttpServer.layer` owns the
 listener while `BunRuntime.runMain` handles execution, SIGINT, and SIGTERM.
+Keep `TARANTOOL_OPERATION_TIMEOUT_MS` below `HTTP_REQUEST_TIMEOUT_MS`, and the
+HTTP timeout below the upstream proxy deadline.
 Better Auth requires Promise-returning adapter methods, so `Effect.runPromise`
 is used only at that external interface boundary.
 
@@ -291,14 +326,10 @@ BunRuntime.runMain(program);
 ### Cursor-based list API
 
 `api.users_page(cursor, limit)` lists users across every shard. Replica sets are
-visited in stable UUID order, and users within each shard are in ascending ID
-order. The first cursor is `null`; pass `next_cursor` unchanged to the next
-request. Limits must be between 1 and 100.
-
-The router converts Tarantool's standard Base64 `fetch_pos` into Base64URL
-before returning it. This prevents `+` from becoming a space when the cursor is
-used as a query parameter. Clients should still URL-encode the opaque cursor
-and must never parse or modify it.
+queried concurrently and the router merges users in ascending ID order. The
+first cursor is `null`; pass `next_cursor` unchanged to the next request. The
+cursor contains only the last logical user ID and page number, so it remains
+valid when buckets move between replica sets. Limits must be between 1 and 100.
 
 ```ts
 const first = yield* db.call<CursorPage<User>>('api.users_page', null, 25);
@@ -318,23 +349,21 @@ Response shape:
   has_more: boolean;
   totalPage: number;
   currentPage: number;
-  lastCursor: string | null; // opens the final page directly
+  lastCursor: null; // retained for compatibility; exact lookup is not O(1)
 }
 ```
 
-`totalPage` is based on a cluster-wide count and the requested limit.
-`currentPage` is carried inside newly issued opaque cursors. `lastCursor` is
-`null` when the first page is also the final page; otherwise pass it as the
-normal `cursor` parameter to open the final page. Calculating totals and the
-final cursor fans out across the cluster and traverses index positions, so a
-large production dataset should cache this metadata or omit it.
+`totalPage` is calculated from transactional per-storage counters returned with
+the page fragments. Inserts, deletes, and vshard tuple moves update those
+counters through an `on_replace` trigger in the same transaction. `lastCursor`
+is always `null`: an exact final-page cursor needs an order-statistics index and
+must not be simulated by replaying every page.
 
-This uses Tarantool's native TREE-index pagination. Each storage calls
-`index:select({}, {after = position, fetch_pos = true})`; `fetch_pos` produces
-the base64 position used as `after` on the next request. Since positions belong
-to a particular shard/index, the router cursor also records the active replica
-set. Inserts after a shard's current position may appear later; deleted rows are
-naturally skipped. A topology change can invalidate an outstanding cursor.
+Each storage performs a bounded `GT` scan on the primary ID index. The router
+requests `limit + 1` rows concurrently from every replica set, de-duplicates by
+ID (including during bucket movement), sorts, and returns one page. Configure
+replica `zone` values and the vshard `weights` distance matrix in multi-DC
+deployments; `replicaset:callro` then selects the nearest available node.
 
 Configuration defaults are in `.env.example`. Bun automatically reads a local
 `.env`, so copy it when you want to override the connection values.
@@ -377,7 +406,7 @@ docker compose exec storage-1 console
 
 ```lua
 vshard.storage.info()
-box.space.users:len()
+box.space.counters:get({'users'})
 box.space.users.index.primary:select({101})
 box.space.users.index.age:select({21}, {iterator = 'GE', limit = 10})
 box.snapshot()
@@ -389,21 +418,123 @@ only to one or more routers.
 
 ## Important production gaps
 
-This compact topology has no redundancy. In production, use multiple storage
-replicas per replica set, multiple routers, automatic leader election/failover,
-TLS, secrets outside source control, backups, monitoring, resource limits, and
-a tested resharding/upgrade procedure. Pin the vshard rock version in the image
-after validation instead of installing its newest compatible release.
+This compact topology has no redundancy and intentionally uses development
+credentials and exposed diagnostic ports. Do not deploy it unchanged. The
+complete production gap analysis and acceptance criteria are maintained in
+[`docs/PRODUCTION_READINESS.md`](docs/PRODUCTION_READINESS.md).
+
+## Production readiness task list
+
+A checked item means the control is implemented in this repository and has
+corresponding automated or live integration coverage where practical. It does
+not mean the entire system is production-ready; every unchecked release
+blocker still needs implementation and evidence.
+
+### Tarantool data and query safety
+
+- [x] Route point reads and writes by stable vshard bucket keys.
+- [x] Use logical value-based pagination cursors instead of replica-set UUIDs
+      or physical shard indexes.
+- [x] Paginate the current global user stream by its unique primary ID, avoiding
+      ties and physical-topology state.
+- [x] Perform bounded index scans on storage and scatter-gather concurrently
+      across shards.
+- [x] Maintain record counters atomically instead of using `space:len()` on
+      Vinyl-compatible paths.
+- [x] Use indexed Better Auth lookup, count, update, and delete paths.
+- [x] Run CRUD 1.7.5 on every router and storage for generic user point CRUD
+      and global indexed selection.
+- [x] Pin Tarantool 3.8.0 and CRUD's vshard/checks/errors dependencies to exact
+      release versions.
+- [ ] Before adding pagination ordered by `age`, `created_at`, or another
+      non-unique field, implement and test a `[secondary_value, primary_id]`
+      cursor.
+- [ ] Resolve global uniqueness and cross-shard transaction guarantees for
+      Better Auth identities and tokens.
+- [ ] Implement and test versioned, rolling schema migrations with rollback or
+      forward-fix procedures.
+
+### Client availability and overload protection
+
+- [x] Support multiple router endpoints with one multiplexed connection per
+      endpoint.
+- [x] Select the least-loaded healthy router and rotate among equal candidates.
+- [x] Apply global and per-router bulkheads with immediate load shedding.
+- [x] Apply circuit breaking, a single half-open probe, and pool-owned
+      reconnection.
+- [x] Disable the driver's offline queue and automatic reconnect race.
+- [x] Never replay ambiguous ordinary calls or writes; retry only explicitly
+      repeatable `callReadonly` operations and `ping`.
+- [x] Coordinate database and HTTP deadlines and validate their ordering at
+      startup.
+- [x] Drain in-flight work and close router connections during graceful
+      shutdown.
+- [x] Export per-router saturation, rejection, failure, reconnect, and circuit
+      state through `/metrics`.
+- [ ] Tune deadlines, bulkheads, circuit thresholds, and alerts using
+      production-representative load, fault, and soak tests.
+- [ ] Integrate production service discovery and deploy routers across
+      independent hosts or zones.
+
+### Topology, durability, and recovery
+
+- [x] Run two stateless routers in the local Docker topology.
+- [ ] Run multiple storage replicas per replica set across independent failure
+      domains.
+- [ ] Implement and destructively test automated or supervised storage
+      failover and leader discovery.
+- [ ] Run redundant application instances behind health-aware load balancing.
+- [ ] Define and approve consistency, region, RPO, and RTO requirements.
+- [ ] Automate encrypted off-host backups and continuously monitor them.
+- [ ] Pass scheduled restore, point-in-time recovery, and disaster-recovery
+      exercises.
+- [ ] Test bucket rebalancing under concurrent production traffic.
+
+### Security and dependency controls
+
+- [x] Validate API inputs and database responses with Effect schemas and typed
+      error channels.
+- [x] Protect application user routes with Better Auth authorization.
+- [ ] Remove development credential fallbacks and load all secrets from a
+      production secret manager with rotation.
+- [ ] Explicitly configure production origins, secure cookies, trusted proxies,
+      and a shared distributed authentication rate limiter.
+- [ ] Encrypt external and cluster traffic and enforce private network policy.
+- [ ] Remove public storage/Admin exposure or protect it with authenticated,
+      audited administrative access.
+- [ ] Pin dependencies and container images to reviewed exact versions or
+      digests and enable vulnerability/SBOM scanning.
+- [ ] Complete threat modeling, dependency review, and external penetration
+      testing.
+
+### HTTP, email, and operations
+
+- [x] Expose schema-first HTTP endpoints and generated OpenAPI documentation.
+- [x] Separate cheap process health from Tarantool pool metrics.
+- [ ] Add dependency-aware readiness that verifies router reachability and
+      vshard bucket coverage without turning liveness into a dependency check.
+- [ ] Restrict `/metrics` to the monitoring network and integrate it with the
+      production telemetry backend.
+- [ ] Add structured logs, distributed traces, dashboards, SLOs, alerts, and
+      operational runbooks.
+- [ ] Replace direct SMTP delivery with a durable outbox/queue, idempotent
+      workers, retry limits, and dead-letter handling.
+- [ ] Add HTTP header/body/concurrency limits and distributed abuse controls.
+- [ ] Pass correctness, race, failover, network-partition, security, load, and
+      long-running soak test programs.
+- [ ] Obtain database, security, platform, and service-owner production
+      approval.
 
 ## Troubleshooting
 
-- `ECONNREFUSED`: wait for all three health checks; inspect Compose logs.
+- `ECONNREFUSED`: wait for both routers and both storages to become healthy;
+  inspect Compose logs.
 - authentication errors: use the router credentials from `.env.example`.
 - duplicate key: examples use timestamps, but persisted data survives restarts;
   reset the learning data if an earlier interrupted run reused the same ID.
 - Docker unavailable under WSL: enable Docker Desktop integration for this WSL
   distribution, then rerun `docker compose up --build -d`.
 
-References: [vshard quick start](https://www.tarantool.io/en/doc/2.11/how-to/vshard_quick/),
+References: [vshard quick start](https://www.tarantool.io/en/doc/latest/how-to/vshard_quick/),
 [vshard router API](https://www.tarantool.io/docs/tarantool/en/3_x/reference/reference_rock/vshard/vshard_api/vshard_router),
 and [Node.js connector documentation](https://www.tarantool.io/en/doc/latest/connector/community/nodejs/).

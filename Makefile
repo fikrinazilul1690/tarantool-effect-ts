@@ -45,6 +45,7 @@ logs:
 ui:
 	@echo "Community Tarantool Admin: http://localhost:8000"
 	@echo "Router:    router:3301    user app       password app-secret"
+	@echo "Router 2:  router-2:3301  user app       password app-secret"
 	@echo "Storage 1: storage-1:3301 user storage   password storage-secret"
 	@echo "Storage 2: storage-2:3301 user storage   password storage-secret"
 

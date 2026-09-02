@@ -10,7 +10,9 @@ services:
 
   storage-1:
     build: .
-    command: ["tarantool", "/opt/tarantool/app/storage.lua"]
+    user: "1000:0"
+    entrypoint: ["env", "-u", "TT_APP_NAME", "-u", "TT_INSTANCE_NAME", "tarantool"]
+    command: ["/opt/tarantool/app/storage.lua"]
     environment:
       INSTANCE_UUID: aaaaaaaa-aaaa-4000-b000-000000000001
       REPLICASET_UUID: aaaaaaaa-0000-4000-b000-000000000000
@@ -21,14 +23,16 @@ services:
     ports:
       - "3302:3301"
     healthcheck:
-      test: ["CMD", "tarantool_is_up"]
+      test: ["CMD", "env", "-u", "TT_APP_NAME", "-u", "TT_INSTANCE_NAME", "tarantool", "/opt/tarantool/app/healthcheck.lua"]
       interval: 2s
       timeout: 2s
       retries: 30
 
   storage-2:
     build: .
-    command: ["tarantool", "/opt/tarantool/app/storage.lua"]
+    user: "1000:0"
+    entrypoint: ["env", "-u", "TT_APP_NAME", "-u", "TT_INSTANCE_NAME", "tarantool"]
+    command: ["/opt/tarantool/app/storage.lua"]
     environment:
       INSTANCE_UUID: bbbbbbbb-bbbb-4000-b000-000000000001
       REPLICASET_UUID: bbbbbbbb-0000-4000-b000-000000000000
@@ -39,14 +43,16 @@ services:
     ports:
       - "3303:3301"
     healthcheck:
-      test: ["CMD", "tarantool_is_up"]
+      test: ["CMD", "env", "-u", "TT_APP_NAME", "-u", "TT_INSTANCE_NAME", "tarantool", "/opt/tarantool/app/healthcheck.lua"]
       interval: 2s
       timeout: 2s
       retries: 30
 
   router:
     build: .
-    command: ["tarantool", "/opt/tarantool/app/router.lua"]
+    user: "1000:0"
+    entrypoint: ["env", "-u", "TT_APP_NAME", "-u", "TT_INSTANCE_NAME", "tarantool"]
+    command: ["/opt/tarantool/app/router.lua"]
     environment:
       LISTEN: "0.0.0.0:3301"
     volumes:
@@ -60,7 +66,30 @@ services:
       storage-2:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "tarantool_is_up"]
+      test: ["CMD", "env", "-u", "TT_APP_NAME", "-u", "TT_INSTANCE_NAME", "tarantool", "/opt/tarantool/app/healthcheck.lua"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  router-2:
+    build: .
+    user: "1000:0"
+    entrypoint: ["env", "-u", "TT_APP_NAME", "-u", "TT_INSTANCE_NAME", "tarantool"]
+    command: ["/opt/tarantool/app/router.lua"]
+    environment:
+      LISTEN: "0.0.0.0:3301"
+    volumes:
+      - ./tarantool:/opt/tarantool/app:ro
+      - ./data/router-2:/var/lib/tarantool
+    ports:
+      - "3304:3301"
+    depends_on:
+      storage-1:
+        condition: service_healthy
+      storage-2:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "env", "-u", "TT_APP_NAME", "-u", "TT_INSTANCE_NAME", "tarantool", "/opt/tarantool/app/healthcheck.lua"]
       interval: 2s
       timeout: 2s
       retries: 30

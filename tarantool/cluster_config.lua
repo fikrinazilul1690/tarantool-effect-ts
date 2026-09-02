@@ -1,6 +1,9 @@
 local M = {}
 
 M.bucket_count = 3000
+M.read_timeout = 2
+-- Add `zone` to every replica and a `weights` distance matrix here in a
+-- multi-DC deployment. replicaset:callro uses them to select the nearest node.
 M.sharding = {
     ['aaaaaaaa-0000-4000-b000-000000000000'] = {
         replicas = {
@@ -23,4 +26,3 @@ M.sharding = {
 }
 
 return M
-

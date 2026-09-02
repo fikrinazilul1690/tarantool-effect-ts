@@ -11,7 +11,7 @@ const InfrastructureLive = Layer.mergeAll(
   TarantoolUserRepositoryLive,
 ).pipe(
   Layer.provide(EmailLive),
-  Layer.provide(TarantoolDbLive),
+  Layer.provideMerge(TarantoolDbLive),
 );
 
 const ApplicationLive = HttpServerLive.pipe(
