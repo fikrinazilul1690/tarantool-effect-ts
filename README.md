@@ -245,6 +245,15 @@ cookies, including Postman and curl cookie jars, must send an `Origin` matching
 around `MISSING_OR_NULL_ORIGIN` by disabling Better Auth's origin or CSRF
 checks.
 
+When signup uses an already registered email, Better Auth keeps its synthetic
+success response to prevent account enumeration. The `onExistingUserSignUp`
+hook sends a security notification to the persisted account owner; notification
+failures are logged and do not change the response seen by the requester. This
+hook does not resend a verification link and never receives or includes the
+attempted password. Production still requires a shared per-IP/per-email rate
+limiter and a durable email outbox to prevent notification abuse and remove
+SMTP from the request path.
+
 The custom adapter stores Better Auth's `user`, `session`, `account`, and
 verification models as maps in the `auth_records` space. Records are sharded
 by the stable hash of `model:id`; queries without an ID fan out through the

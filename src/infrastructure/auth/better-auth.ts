@@ -36,6 +36,20 @@ export const BetterAuthLive = Layer.effect(
       emailAndPassword: {
         enabled: true,
         requireEmailVerification: true,
+        onExistingUserSignUp: ({user}) => Effect.runPromise(
+          email.sendRegistrationAttempt({
+            to: user.email,
+            name: user.name,
+            attemptedAt: new Date(),
+          }).pipe(
+            // Notification delivery must not reveal account existence through
+            // a different signup response or status code.
+            Effect.catch((cause) => Effect.logError(
+              'Failed to send existing-user registration notification',
+              cause,
+            )),
+          ),
+        ),
       },
       emailVerification: {
         sendOnSignUp: true,

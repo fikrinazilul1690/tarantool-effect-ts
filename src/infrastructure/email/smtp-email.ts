@@ -13,8 +13,17 @@ export interface VerificationEmail {
   readonly verificationUrl: string;
 }
 
+export interface RegistrationAttemptEmail {
+  readonly to: string;
+  readonly name: string;
+  readonly attemptedAt: Date;
+}
+
 interface EmailShape {
   readonly sendVerification: (message: VerificationEmail) => Effect.Effect<void, EmailError>;
+  readonly sendRegistrationAttempt: (
+    message: RegistrationAttemptEmail,
+  ) => Effect.Effect<void, EmailError>;
 }
 
 export class Email extends Context.Service<Email, EmailShape>()('learn-tarantool/Email') {}
@@ -62,7 +71,27 @@ export const EmailLive = Layer.effect(
         catch: (cause) => new EmailError({operation: 'send', cause}),
       });
     };
-    return Email.of({sendVerification});
+    const sendRegistrationAttempt = (
+      message: RegistrationAttemptEmail,
+    ): Effect.Effect<void, EmailError> => {
+      if (transporter === null) {
+        return Effect.logWarning(
+          `Email delivery disabled. Registration attempt notification for ${message.to} was not sent.`,
+        );
+      }
+      const attemptedAt = message.attemptedAt.toISOString();
+      return Effect.tryPromise({
+        try: () => transporter.sendMail({
+          from: config.from!,
+          to: message.to,
+          subject: 'A registration attempt used your email address',
+          text: `Hello ${message.name},\n\nSomeone attempted to register a Learn Tarantool account using your email address at ${attemptedAt}.\n\nYour account was not changed. If this was not you, no action is required.`,
+          html: `<p>Hello ${escapeHtml(message.name)},</p><p>Someone attempted to register a Learn Tarantool account using your email address at <strong>${escapeHtml(attemptedAt)}</strong>.</p><p>Your account was not changed. If this was not you, no action is required.</p>`,
+        }).then(() => undefined),
+        catch: (cause) => new EmailError({operation: 'send', cause}),
+      });
+    };
+    return Email.of({sendVerification, sendRegistrationAttempt});
   }),
 );
 
