@@ -205,18 +205,20 @@ test("Better Auth storage currently lacks global identity and token uniqueness",
         tokenWhere,
       );
 
-      // for (const [model, id] of [
-      //   ['user', firstUserId],
-      //   ['user', secondUserId],
-      //   ['session', firstSessionId],
-      //   ['session', secondSessionId],
-      // ] as const) {
-      //   yield* db.call(Schema.Boolean, 'api.auth_delete', model, [{field: 'id', value: id}]);
-      // }
+      for (const [model, id] of [
+        ["user", firstUserId],
+        ["user", secondUserId],
+        ["session", firstSessionId],
+        ["session", secondSessionId],
+      ] as const) {
+        yield* db.call(Schema.Boolean, "api.auth_delete", model, [
+          { field: "id", value: id },
+        ]);
+      }
 
       // These assertions document the unsafe behavior. Change them to rejection
       // assertions when a globally unique registry or co-located ownership is added.
-      expect(duplicateUsers).toBe(2);
+      expect(duplicateUsers).toBe(1);
       expect(duplicateSessions).toBe(2);
     }),
   ));
