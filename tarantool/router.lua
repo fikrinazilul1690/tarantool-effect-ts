@@ -5,6 +5,56 @@ local common = require("cluster_config")
 local fiber = require("fiber")
 local crud = require("crud")
 
+---@class User
+---@field id integer
+---@field bucket_id integer
+---@field email string
+---@field name string
+---@field age integer
+---@field created_at integer
+
+---@class UserChanges
+---@field email? string
+---@field name? string
+---@field age? integer
+
+---@class UserPage
+---@field items User[]
+---@field next_cursor string|userdata
+---@field has_more boolean
+---@field totalPage integer
+---@field currentPage integer
+
+---@class CrudMetadata
+---@field name string
+
+---@class CrudResult
+---@field rows? unknown[][]
+---@field metadata? CrudMetadata[]
+
+---@class AuthCondition
+---@field field string
+---@field operator? string
+---@field value unknown
+
+---@alias AuthWhere AuthCondition[]
+
+---@class AuthSort
+---@field field string
+---@field direction? 'asc'|'desc'
+
+---@class AuthData: table<string, unknown>
+---@field id string
+---@field email? string
+---@field token? string
+---@field providerId? string
+---@field accountId? string
+---@field identifier? string
+
+---@class EmailOutboxInput: table<string, unknown>
+---@field id string
+---@field payload table<string, unknown>
+
 box.cfg({
 	listen = os.getenv("LISTEN") or "0.0.0.0:3301",
 	memtx_memory = 64 * 1024 * 1024,
@@ -25,26 +75,34 @@ vshard.router.cfg({
 vshard.router.bootstrap({ if_not_bootstrapped = true })
 crud.init_router()
 
+---@type table<string, function>
 api = {}
 
+---@param id integer|string
+---@return integer
 local function bucket_for(id)
 	-- vshard 0.1.42 requires the sharding key to be an array, even when the
 	-- key contains a single field.
 	return vshard.router.bucket_id_mpcrc32({ id })
 end
 
+---@param result CrudResult?
+---@return table<string, unknown>|userdata
 local function first_crud_object(result)
 	local row = result ~= nil and result.rows ~= nil and result.rows[1] or nil
 	if row == nil then
 		return box.NULL
 	end
 	local object = {}
-	for field_no, field in ipairs(result.metadata or {}) do
+	local metadata = result ~= nil and result.metadata or {}
+	for field_no, field in ipairs(metadata) do
 		object[field.name] = row[field_no]
 	end
 	return object
 end
 
+---@param result CrudResult
+---@return table<string, unknown>[]
 local function crud_objects(result)
 	local objects = {}
 	for _, row in ipairs(result.rows or {}) do
@@ -57,10 +115,12 @@ local function crud_objects(result)
 	return objects
 end
 
+---@param id integer|string
 function api.bucket_id(id)
 	return bucket_for(id)
 end
 
+---@param user User
 function api.user_create(user)
 	user.bucket_id = bucket_for(user.id)
 	user.created_at = user.created_at or os.time()
@@ -74,6 +134,7 @@ function api.user_create(user)
 	return first_crud_object(result)
 end
 
+---@param id integer
 function api.user_get(id)
 	local bucket_id = bucket_for(id)
 	local result, err = crud.get("users", { id }, {
@@ -89,6 +150,8 @@ function api.user_get(id)
 	return first_crud_object(result)
 end
 
+---@param id integer
+---@param changes UserChanges
 function api.user_update(id, changes)
 	local bucket_id = bucket_for(id)
 	local operations = {}
@@ -114,6 +177,7 @@ function api.user_update(id, changes)
 	return first_crud_object(result)
 end
 
+---@param id integer
 function api.user_delete(id)
 	local bucket_id = bucket_for(id)
 	local result, err = crud.delete("users", { id }, {
@@ -126,6 +190,9 @@ function api.user_delete(id)
 	return first_crud_object(result)
 end
 
+---@param id_in_bucket integer
+---@param minimum_age integer
+---@param limit integer
 function api.users_by_age(id_in_bucket, minimum_age, limit)
 	local bucket_id = bucket_for(id_in_bucket)
 	return vshard.router.callro(bucket_id, "storage_api.users_by_age", { bucket_id, minimum_age, limit })
@@ -146,6 +213,9 @@ local function replicasets()
 	return result
 end
 
+---@param cursor? string|userdata
+---@return integer last_id
+---@return integer current_page
 local function decode_cursor(cursor)
 	if cursor == nil or cursor == box.NULL or cursor == "" then
 		return 0, 1
@@ -157,9 +227,12 @@ local function decode_cursor(cursor)
 	if page_number == nil then
 		error("invalid cursor")
 	end
-	return tonumber(last_id), tonumber(page_number)
+	return assert(tonumber(last_id)), assert(tonumber(page_number))
 end
 
+---@param mode 'read'|'write'
+---@param function_name string
+---@param arguments unknown[]
 local function scatter_call(mode, function_name, arguments)
 	local targets = replicasets()
 	local channel = fiber.channel(#targets)
@@ -192,14 +265,20 @@ local function scatter_call(mode, function_name, arguments)
 	return results
 end
 
+---@param function_name string
+---@param arguments unknown[]
 local function scatter_callro(function_name, arguments)
 	return scatter_call("read", function_name, arguments)
 end
 
+---@param function_name string
+---@param arguments unknown[]
 local function scatter_callrw(function_name, arguments)
 	return scatter_call("write", function_name, arguments)
 end
 
+---@param cursor? string|userdata
+---@param requested_limit? integer
 function api.users_page(cursor, requested_limit)
 	local limit = requested_limit or 20
 	if type(limit) ~= "number" or limit % 1 ~= 0 or limit < 1 or limit > 100 then
@@ -207,8 +286,9 @@ function api.users_page(cursor, requested_limit)
 	end
 
 	local last_id, current_page = decode_cursor(cursor)
-	local selected, select_err = crud.select("users", { { ">", "id", last_id } }, {
+	local selected, select_err = crud.select("users", nil, {
 		first = limit + 1,
+		after = { last_id },
 		timeout = common.read_timeout,
 		request_timeout = common.read_timeout,
 		mode = "read",
@@ -245,6 +325,9 @@ function api.users_page(cursor, requested_limit)
 	}
 end
 
+---@param first_id integer
+---@param second_id integer
+---@param amount integer
 function api.transfer_age(first_id, second_id, amount)
 	local first_bucket = bucket_for(first_id)
 	local second_bucket = bucket_for(second_id)
@@ -259,6 +342,8 @@ function api.cluster_info()
 	return { bucket_count = common.bucket_count, replicasets = info.replicasets }
 end
 
+---@param email unknown
+---@return string?
 local function normalize_email(email)
 	if type(email) ~= "string" then
 		return nil
@@ -266,6 +351,9 @@ local function normalize_email(email)
 	return string.lower(string.match(email, "^%s*(.-)%s*$"))
 end
 
+---@param where AuthWhere?
+---@param field string
+---@return unknown
 local function auth_condition(where, field)
 	for _, condition in ipairs(where or {}) do
 		if condition.field == field and (condition.operator == nil or condition.operator == "eq") then
@@ -275,6 +363,8 @@ local function auth_condition(where, field)
 	return nil
 end
 
+---@param id unknown
+---@return integer?
 local function encoded_auth_bucket(id)
 	if type(id) ~= "string" then
 		return nil
@@ -287,6 +377,9 @@ local function encoded_auth_bucket(id)
 	return bucket_id
 end
 
+---@param model string
+---@param data AuthData
+---@return integer
 local function auth_unique_bucket(model, data)
 	if model == "user" then
 		local email = normalize_email(data.email)
@@ -316,6 +409,9 @@ local function auth_unique_bucket(model, data)
 	return vshard.router.bucket_id_strcrc32(model .. ":" .. data.id)
 end
 
+---@param model string
+---@param where AuthWhere?
+---@return integer?
 local function auth_where_bucket(model, where)
 	local id = auth_condition(where, "id")
 	local bucket_id = encoded_auth_bucket(id)
@@ -347,6 +443,8 @@ local function auth_where_bucket(model, where)
 	return nil
 end
 
+---@param model string
+---@param data AuthData
 function api.auth_create(model, data)
 	if type(data.id) ~= "string" then
 		error("Better Auth record id must be a string")
@@ -362,6 +460,11 @@ function api.auth_create(model, data)
 	return vshard.router.callrw(bucket_id, "storage_api.auth_create", { model, data, bucket_id })
 end
 
+---@param model string
+---@param where AuthWhere?
+---@param limit? integer
+---@param offset? integer
+---@param sort_by? AuthSort|userdata
 function api.auth_find_many(model, where, limit, offset, sort_by)
 	if sort_by == box.NULL then
 		sort_by = nil
@@ -402,7 +505,10 @@ function api.auth_find_many(model, where, limit, offset, sort_by)
 		end
 	end
 	if sort_by ~= nil then
-		table.sort(rows, function(left, right)
+		table.sort(rows,
+			---@param left table<string, unknown>
+			---@param right table<string, unknown>
+			function(left, right)
 			if left[sort_by.field] == right[sort_by.field] then
 				return left.id < right.id
 			end
@@ -425,6 +531,8 @@ function api.auth_find_many(model, where, limit, offset, sort_by)
 	return result
 end
 
+---@param model string
+---@param where AuthWhere?
 function api.auth_count(model, where)
 	local bucket_id = auth_where_bucket(model, where)
 	if bucket_id ~= nil then
@@ -446,6 +554,11 @@ function api.auth_count(model, where)
 	return total
 end
 
+---@param model string
+---@param where AuthWhere
+---@param changes? table<string, unknown>
+---@param consume? boolean
+---@param increments? table<string, number>
 local function auth_mutate_one(model, where, changes, consume, increments)
 	local bucket_id = auth_where_bucket(model, where)
 	if bucket_id ~= nil then
@@ -479,23 +592,38 @@ local function auth_mutate_one(model, where, changes, consume, increments)
 	return found
 end
 
+---@param model string
+---@param where AuthWhere
+---@param changes table<string, unknown>
 function api.auth_update(model, where, changes)
 	return auth_mutate_one(model, where, changes, false, {})
 end
 
+---@param model string
+---@param where AuthWhere
 function api.auth_consume(model, where)
 	return auth_mutate_one(model, where, {}, true, {})
 end
 
+---@param model string
+---@param where AuthWhere
+---@param increments table<string, number>
+---@param changes? table<string, unknown>
 function api.auth_increment(model, where, increments, changes)
 	return auth_mutate_one(model, where, changes or {}, false, increments)
 end
 
+---@param model string
+---@param where AuthWhere
 function api.auth_delete(model, where)
 	auth_mutate_one(model, where, {}, true, {})
 	return true
 end
 
+---@param model string
+---@param where AuthWhere
+---@param changes? table<string, unknown>
+---@param remove? boolean
 function api.auth_update_many(model, where, changes, remove)
 	local count = 0
 	for _, changed in
@@ -506,6 +634,8 @@ function api.auth_update_many(model, where, changes, remove)
 	return count
 end
 
+---@param id string
+---@return integer
 local function email_outbox_bucket(id)
 	local encoded = encoded_auth_bucket(id)
 	if encoded ~= nil then
@@ -514,6 +644,7 @@ local function email_outbox_bucket(id)
 	return vshard.router.bucket_id_strcrc32("email-outbox:" .. id)
 end
 
+---@param job EmailOutboxInput
 function api.email_outbox_enqueue(job)
 	if type(job) ~= "table" or type(job.id) ~= "string" or type(job.payload) ~= "table" then
 		error("invalid email outbox job")
@@ -530,6 +661,10 @@ function api.email_outbox_enqueue(job)
 	)
 end
 
+---@param owner string
+---@param now integer
+---@param lease_ms integer
+---@param limit integer
 function api.email_outbox_claim(owner, now, lease_ms, limit)
 	if type(owner) ~= "string" or type(now) ~= "number" or type(lease_ms) ~= "number" then
 		error("invalid email outbox claim")
@@ -538,10 +673,7 @@ function api.email_outbox_claim(owner, now, lease_ms, limit)
 		error("email outbox claim limit must be between 1 and 1000 per shard")
 	end
 	local jobs = {}
-	for _, shard_jobs in ipairs(scatter_callrw(
-		"storage_api.email_outbox_claim",
-		{ owner, now, lease_ms, limit }
-	)) do
+	for _, shard_jobs in ipairs(scatter_callrw("storage_api.email_outbox_claim", { owner, now, lease_ms, limit })) do
 		for _, job in ipairs(shard_jobs) do
 			table.insert(jobs, job)
 		end
@@ -549,6 +681,8 @@ function api.email_outbox_claim(owner, now, lease_ms, limit)
 	return jobs
 end
 
+---@param id string
+---@param owner string
 function api.email_outbox_ack(id, owner)
 	local bucket_id = email_outbox_bucket(id)
 	return vshard.router.callrw(
@@ -559,6 +693,10 @@ function api.email_outbox_ack(id, owner)
 	)
 end
 
+---@param id string
+---@param owner string
+---@param now integer
+---@param lease_ms integer
 function api.email_outbox_claim_one(id, owner, now, lease_ms)
 	local bucket_id = email_outbox_bucket(id)
 	return vshard.router.callrw(
@@ -569,6 +707,12 @@ function api.email_outbox_claim_one(id, owner, now, lease_ms)
 	)
 end
 
+---@param id string
+---@param owner string
+---@param retry_at integer
+---@param max_attempts integer
+---@param last_error string
+---@param now integer
 function api.email_outbox_fail(id, owner, retry_at, max_attempts, last_error, now)
 	local bucket_id = email_outbox_bucket(id)
 	return vshard.router.callrw(

@@ -1,12 +1,11 @@
 FROM tarantool/tarantool:3.8.0
 
 USER root
+COPY learn-tarantool-1.0.0-1.rockspec /tmp/learn-tarantool-1.0.0-1.rockspec
 RUN apt-get update \
     && apt-get install -y --no-install-recommends git ca-certificates cmake build-essential unzip \
-    && tt rocks install checks 3.4.1-1 \
-    && tt rocks install errors 2.2.1-1 \
-    && tt rocks install vshard 0.1.42-1 \
-    && tt rocks install crud 1.7.5-1 \
+    && cd /tmp \
+    && tt rocks make --tree /usr/local learn-tarantool-1.0.0-1.rockspec \
     && apt-get purge -y --auto-remove git cmake build-essential unzip \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* /tmp/learn-tarantool-1.0.0-1.rockspec
 WORKDIR /opt/tarantool/app

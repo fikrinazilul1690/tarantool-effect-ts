@@ -1,0 +1,26 @@
+{
+  "$schema": "https://raw.githubusercontent.com/LuaLS/vscode-lua/master/setting/schema.json",
+  "runtime.version": "LuaJIT",
+  "runtime.path": [
+    "?.lua",
+    "?/init.lua",
+    "/usr/local/share/tarantool/?.lua",
+    "/usr/local/share/tarantool/?/init.lua"
+  ],
+  "workspace.ignoreDir": [
+    ".git",
+    "data",
+    "node_modules"
+  ],
+  "diagnostics.globals": [
+    "box",
+    "vshard",
+    "api",
+    "storage_api"
+  ],
+  "diagnostics.severity": {
+    "missing-fields": "Warning",
+    "param-type-mismatch": "Warning",
+    "return-type-mismatch": "Warning"
+  }
+}

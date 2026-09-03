@@ -4,6 +4,66 @@ vshard = require("vshard")
 local common = require("cluster_config")
 local crud = require("crud")
 
+---@class UserTupleInput
+---@field id integer
+---@field bucket_id integer
+---@field email string
+---@field name string
+---@field age integer
+---@field created_at integer
+
+---@class AuthRecordData
+---@field id string
+---@field email? string
+---@field token? string
+---@field userId? string
+---@field accountId? string
+---@field providerId? string
+---@field identifier? string
+---@field expiresAt? unknown
+---@field createdAt? unknown
+
+---@class EmailOutboxJob
+---@field id string
+---@field status string
+---@field payload unknown
+---@field created_at integer
+
+---@class StorageUserChanges
+---@field email? string
+---@field name? string
+---@field age? integer
+
+---@class StorageAuthCondition
+---@field field string
+---@field value unknown
+---@field operator? string
+---@field connector? 'AND'|'OR'
+---@field mode? 'sensitive'|'insensitive'
+
+---@alias StorageAuthWhere StorageAuthCondition[]
+
+---@class StorageAuthSort
+---@field field string
+---@field direction? 'asc'|'desc'
+
+---@class AuthTuple
+---@field key string
+---@field bucket_id integer
+---@field model string
+---@field id string
+---@field data table<string, unknown>
+---@field normalizedEmail? string
+---@field token? string
+---@field providerId? string
+---@field accountId? string
+---@field identifier? string
+
+---@class ClaimedEmail
+---@field id string
+---@field payload unknown
+---@field attempts integer
+
 local instance_uuid = assert(os.getenv("INSTANCE_UUID"), "INSTANCE_UUID is required")
 local replicaset_uuid = assert(os.getenv("REPLICASET_UUID"), "REPLICASET_UUID is required")
 
@@ -33,10 +93,14 @@ if not box.info.ro then
 	end)
 end
 
+---@param value unknown
+---@return unknown
 local function nullable(value)
 	return value == nil and box.NULL or value
 end
 
+---@param email unknown
+---@return string?
 local function normalize_email(email)
 	if type(email) ~= "string" then
 		return nil
@@ -253,6 +317,8 @@ box.once("better-auth-verification-created-at-v4", function()
 	})
 end)
 
+---@param name string
+---@param engine 'memtx'|'vinyl'
 local function create_email_outbox(name, engine)
 	local outbox = box.schema.space.create(name, {
 		if_not_exists = true,
@@ -353,27 +419,34 @@ end)
 
 -- vshard tuple moves also execute on_replace, so each storage's O(1) counter
 -- remains correct as buckets enter or leave during rebalancing.
-box.space.users:on_replace(function(old, new)
-	-- The master's counter mutation is replicated in the same WAL transaction;
-	-- do not apply it a second time while replaying that transaction.
-	if box.session.type() == "applier" then
-		return
+box.space.users:on_replace(
+	---@param old? any Tarantool user tuple before replacement.
+	---@param new? any Tarantool user tuple after replacement.
+	function(old, new)
+		-- The master's counter mutation is replicated in the same WAL transaction;
+		-- do not apply it a second time while replaying that transaction.
+		if box.session.type() == "applier" then
+			return
+		end
+		if old == nil and new ~= nil then
+			box.space.counters:update({ "users" }, { { "+", "value", 1 } })
+		elseif old ~= nil and new == nil then
+			box.space.counters:update({ "users" }, { { "-", "value", 1 } })
+		end
 	end
-	if old == nil and new ~= nil then
-		box.space.counters:update({ "users" }, { { "+", "value", 1 } })
-	elseif old ~= nil and new == nil then
-		box.space.counters:update({ "users" }, { { "-", "value", 1 } })
-	end
-end)
+)
 
+---@param bucket_id integer
 local function ensure_bucket(bucket_id)
 	if type(bucket_id) ~= "number" then
 		error("bucket_id must be a number")
 	end
 end
 
+---@type table<string, function>
 storage_api = {}
 
+---@param user UserTupleInput
 function storage_api.user_create(user)
 	ensure_bucket(user.bucket_id)
 	return box.atomic(function()
@@ -389,6 +462,8 @@ function storage_api.user_create(user)
 	end)
 end
 
+---@param bucket_id integer
+---@param id integer
 function storage_api.user_get(bucket_id, id)
 	ensure_bucket(bucket_id)
 	local tuple = box.space.users:get({ id })
@@ -398,6 +473,9 @@ function storage_api.user_get(bucket_id, id)
 	return tuple:tomap({ names_only = true })
 end
 
+---@param bucket_id integer
+---@param id integer
+---@param changes StorageUserChanges
 function storage_api.user_update(bucket_id, id, changes)
 	ensure_bucket(bucket_id)
 	local current = box.space.users:get({ id })
@@ -420,6 +498,8 @@ function storage_api.user_update(bucket_id, id, changes)
 	return box.space.users:update({ id }, operations):tomap({ names_only = true })
 end
 
+---@param bucket_id integer
+---@param id integer
 function storage_api.user_delete(bucket_id, id)
 	ensure_bucket(bucket_id)
 	return box.atomic(function()
@@ -431,6 +511,9 @@ function storage_api.user_delete(bucket_id, id)
 	end)
 end
 
+---@param bucket_id integer
+---@param minimum_age integer
+---@param limit? integer
 function storage_api.users_by_age(bucket_id, minimum_age, limit)
 	ensure_bucket(bucket_id)
 	local result = {}
@@ -446,6 +529,8 @@ function storage_api.users_by_age(bucket_id, minimum_age, limit)
 	return result
 end
 
+---@param last_id integer
+---@param limit integer
 function storage_api.users_page_fragment(last_id, limit)
 	local tuples = box.space.users.index.primary:select({ last_id }, {
 		iterator = "GT",
@@ -465,6 +550,10 @@ function storage_api.users_total()
 	return box.space.counters:get({ "users" }).value
 end
 
+---@param bucket_id integer
+---@param first_id integer
+---@param second_id integer
+---@param amount integer
 function storage_api.transfer_age(bucket_id, first_id, second_id, amount)
 	ensure_bucket(bucket_id)
 	return box.atomic(function()
@@ -488,11 +577,15 @@ function storage_api.transfer_age(bucket_id, first_id, second_id, amount)
 	end)
 end
 
+---@param bucket_id integer
 function storage_api.count(bucket_id)
 	ensure_bucket(bucket_id)
 	return box.space.users.index.bucket_id:count({ bucket_id })
 end
 
+---@param actual unknown
+---@param condition StorageAuthCondition
+---@return boolean
 local function compare(actual, condition)
 	local expected = condition.value
 	local operator = condition.operator or "eq"
@@ -527,6 +620,9 @@ local function compare(actual, condition)
 		return type(actual) == "string" and string.sub(actual, -#expected) == expected
 	end
 	if operator == "in" or operator == "not_in" then
+		if type(expected) ~= "table" then
+			return false
+		end
 		local found = false
 		for _, value in ipairs(expected) do
 			if actual == value then
@@ -539,6 +635,10 @@ local function compare(actual, condition)
 	error("unsupported where operator: " .. tostring(operator))
 end
 
+---@param model string
+---@param data table<string, unknown>
+---@param where StorageAuthWhere?
+---@return boolean
 local function matches(model, data, where)
 	if where == nil or #where == 0 then
 		return true
@@ -578,6 +678,9 @@ local function matches(model, data, where)
 	return result
 end
 
+---@param model string
+---@param data AuthRecordData
+---@param bucket_id integer
 function storage_api.auth_create(model, data, bucket_id)
 	local key = model .. ":" .. data.id
 	box.space.auth_records:insert({
@@ -617,9 +720,16 @@ local auth_iterators = {
 	gte = "GE",
 }
 
+---@param index any Tarantool index supplied by `box.space`.
+---@param model string
+---@param key unknown[]
+---@param iterator string
 local function model_bounded_pairs(index, model, key, iterator)
 	local gen, param, state = index:pairs(key, { iterator = iterator })
-	return function(inner_param, inner_state)
+	return
+		---@param inner_param unknown
+		---@param inner_state unknown
+		function(inner_param, inner_state)
 		local next_state, tuple = gen(inner_param, inner_state)
 		if tuple == nil or tuple.model ~= model then
 			return nil
@@ -630,6 +740,9 @@ local function model_bounded_pairs(index, model, key, iterator)
 		state
 end
 
+---@param model string
+---@param where StorageAuthWhere?
+---@param sort_by StorageAuthSort|userdata|nil
 local function auth_scan(model, where, sort_by)
 	for index, condition in ipairs(where or {}) do
 		if index > 1 and condition.connector == "OR" then
@@ -640,7 +753,10 @@ local function auth_scan(model, where, sort_by)
 		for _, condition in ipairs(where) do
 			if condition.field == "id" and (condition.operator == nil or condition.operator == "eq") then
 				local tuple = box.space.auth_records:get({ model .. ":" .. condition.value })
-				return function(_, state)
+				return
+					---@param _ unknown
+					---@param state boolean
+					function(_, state)
 					if state or tuple == nil then
 						return nil
 					end
@@ -695,6 +811,10 @@ local function auth_scan(model, where, sort_by)
 	return box.space.auth_records.index.model:pairs({ model }, { iterator = "EQ" })
 end
 
+---@param model string
+---@param where StorageAuthWhere?
+---@param limit? integer|userdata
+---@param sort_by StorageAuthSort|userdata|nil
 function storage_api.auth_find(model, where, limit, sort_by)
 	local result = {}
 	local scanned = 0
@@ -713,6 +833,8 @@ function storage_api.auth_find(model, where, limit, sort_by)
 	return result
 end
 
+---@param model string
+---@param where StorageAuthWhere?
 function storage_api.auth_count(model, where)
 	local total, scanned = 0, 0
 	for _, tuple in auth_scan(model, where, box.NULL) do
@@ -727,6 +849,8 @@ function storage_api.auth_count(model, where)
 	return total
 end
 
+---@param tuple AuthTuple
+---@param data table<string, unknown>
 local function replace_auth_data(tuple, data)
 	box.space.auth_records:replace({
 		tuple.key,
@@ -746,6 +870,9 @@ local function replace_auth_data(tuple, data)
 	})
 end
 
+---@param model string
+---@param tuple AuthTuple
+---@param changes table<string, unknown>
 local function reject_shard_key_change(model, tuple, changes)
 	if model == "user" and changes.email ~= nil and normalize_email(changes.email) ~= tuple.normalizedEmail then
 		error("user email changes require an explicit cross-bucket migration")
@@ -766,10 +893,15 @@ local function reject_shard_key_change(model, tuple, changes)
 	end
 end
 
+---@param model string
+---@param where StorageAuthWhere
+---@param changes table<string, unknown>
+---@param consume? boolean
+---@param increments table<string, number>
 function storage_api.auth_update_one(model, where, changes, consume, increments)
 	return box.atomic(function()
 		for _, tuple in auth_scan(model, where, box.NULL) do
-		if matches(model, tuple.data, where) then
+			if matches(model, tuple.data, where) then
 				local data = tuple.data
 				if consume then
 					box.space.auth_records:delete({ tuple.key })
@@ -790,11 +922,15 @@ function storage_api.auth_update_one(model, where, changes, consume, increments)
 	end)
 end
 
+---@param model string
+---@param where StorageAuthWhere
+---@param changes table<string, unknown>
+---@param remove? boolean
 function storage_api.auth_update_many(model, where, changes, remove)
 	return box.atomic(function()
 		local keys = {}
 		for _, tuple in auth_scan(model, where, box.NULL) do
-		if matches(model, tuple.data, where) then
+			if matches(model, tuple.data, where) then
 				table.insert(keys, tuple.key)
 			end
 		end
@@ -815,6 +951,8 @@ function storage_api.auth_update_many(model, where, changes, remove)
 	end)
 end
 
+---@param job EmailOutboxJob
+---@param bucket_id integer
 function storage_api.email_outbox_enqueue(job, bucket_id)
 	return box.atomic(function()
 		local existing = box.space.email_outbox:get({ job.id })
@@ -837,6 +975,12 @@ function storage_api.email_outbox_enqueue(job, bucket_id)
 	end)
 end
 
+---@param status 'pending'|'processing'
+---@param owner string
+---@param now integer
+---@param lease_until integer
+---@param limit integer
+---@param jobs ClaimedEmail[]
 local function claim_due(status, owner, now, lease_until, limit, jobs)
 	local ids = {}
 	for _, tuple in box.space.email_outbox.index.due:pairs({ status, 0 }, { iterator = "GE" }) do
@@ -850,18 +994,22 @@ local function claim_due(status, owner, now, lease_until, limit, jobs)
 	for _, id in ipairs(ids) do
 		local tuple = box.space.email_outbox:get({ id })
 		if tuple ~= nil and tuple.status == status and tuple.next_attempt_at <= now then
-		local updated = box.space.email_outbox:update({ tuple.id }, {
-			{ "=", "status", "processing" },
-			{ "+", "attempts", 1 },
-			{ "=", "next_attempt_at", lease_until },
-			{ "=", "lease_owner", owner },
-			{ "=", "updated_at", now },
-		})
-		table.insert(jobs, { id = updated.id, payload = updated.payload, attempts = updated.attempts })
+			local updated = box.space.email_outbox:update({ tuple.id }, {
+				{ "=", "status", "processing" },
+				{ "+", "attempts", 1 },
+				{ "=", "next_attempt_at", lease_until },
+				{ "=", "lease_owner", owner },
+				{ "=", "updated_at", now },
+			})
+			table.insert(jobs, { id = updated.id, payload = updated.payload, attempts = updated.attempts })
 		end
 	end
 end
 
+---@param owner string
+---@param now integer
+---@param lease_ms integer
+---@param limit integer
 function storage_api.email_outbox_claim(owner, now, lease_ms, limit)
 	return box.atomic(function()
 		local jobs = {}
@@ -876,6 +1024,10 @@ function storage_api.email_outbox_claim(owner, now, lease_ms, limit)
 	end)
 end
 
+---@param id string
+---@param owner string
+---@param now integer
+---@param lease_ms integer
 function storage_api.email_outbox_claim_one(id, owner, now, lease_ms)
 	return box.atomic(function()
 		local tuple = box.space.email_outbox:get({ id })
@@ -896,6 +1048,8 @@ function storage_api.email_outbox_claim_one(id, owner, now, lease_ms)
 	end)
 end
 
+---@param id string
+---@param owner string
 function storage_api.email_outbox_ack(id, owner)
 	return box.atomic(function()
 		local tuple = box.space.email_outbox:get({ id })
@@ -907,6 +1061,12 @@ function storage_api.email_outbox_ack(id, owner)
 	end)
 end
 
+---@param id string
+---@param owner string
+---@param retry_at integer
+---@param max_attempts integer
+---@param last_error string
+---@param now integer
 function storage_api.email_outbox_fail(id, owner, retry_at, max_attempts, last_error, now)
 	return box.atomic(function()
 		local tuple = box.space.email_outbox:get({ id })

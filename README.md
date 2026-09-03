@@ -21,8 +21,9 @@ rebalancing much finer-grained than sharding directly by physical server.
 - [Bun](https://bun.sh/) 1.x
 
 The project runs Tarantool 3.8.0 with CRUD 1.7.5, vshard 0.1.42, checks 3.4.1,
-and errors 2.2.1. The rocks are installed at exact release versions in the
-image instead of resolving mutable `scm` dependencies. The Node connector is
+and errors 2.2.1. Exact versions are declared in
+`learn-tarantool-1.0.0-1.rockspec`, which is the single Lua dependency manifest
+used by the image build. The Node connector is
 community-supported, so
 `src/infrastructure/tarantool/client.ts` keeps it behind a typed Effect service.
 
@@ -87,7 +88,15 @@ reverse proxy.
 | `bun run example:sharding` | deterministic bucket IDs and replica-set routing |
 | `bun run example:pagination` | global cursor pagination merged across shards |
 | `bun test` | an end-to-end typed CRUD smoke test |
-| `bun run typecheck` | strict TypeScript checking without running anything |
+| `make typecheck` | strict TypeScript and LuaLS checking without running the application |
+| `make lua-typecheck` | LuaLS annotations and diagnostics for Tarantool Lua files |
+
+Lua checking requires
+[Lua Language Server](https://github.com/LuaLS/lua-language-server) on `PATH`.
+The repository's `.luarc.json` selects LuaJIT and recognizes globals supplied
+by the Tarantool runtime. Editors using LuaLS pick up the same settings
+automatically; the project does not maintain replacement definitions for
+Tarantool's `box` API.
 
 Read these files in order:
 
