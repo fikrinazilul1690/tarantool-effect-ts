@@ -5,7 +5,12 @@ import {
   HttpApiGroup,
   OpenApi,
 } from "effect/unstable/httpapi";
-import { ApiAuthorization, ApiRateLimit, RequestSchemaError, RequestTimeout } from "./middleware";
+import {
+  ApiAuthorization,
+  ApiRateLimit,
+  RequestSchemaError,
+  RequestTimeout,
+} from "./middleware";
 import {
   HealthSuccess,
   InternalErrorResponse,
@@ -25,7 +30,8 @@ export class SystemApi extends HttpApiGroup.make("system", {
     HttpApiEndpoint.get("metrics", "/metrics", {
       success: MetricsSuccess,
     }),
-  ) { }
+  )
+  { }
 
 export class UsersApi extends HttpApiGroup.make("users")
   .add(

@@ -1,9 +1,5 @@
 import { Context, Effect, Layer, Redacted } from "effect";
-import {
-  HttpApiMiddleware,
-  HttpApiSecurity,
-  OpenApi,
-} from "effect/unstable/httpapi";
+import { HttpApiMiddleware, HttpApiSecurity, OpenApi } from "effect/unstable/httpapi";
 import { BetterAuth } from "../../../infrastructure/auth/better-auth";
 import { UnauthorizedResponse, errorResponse } from "../schemas";
 
@@ -32,13 +28,11 @@ export class ApiAuthorization extends HttpApiMiddleware.Service<
     requires: BetterAuth;
   }
 >()("learn-tarantool/api/Authorization", {
-  requiredForClient: true,
-  security: {
-    bearer: HttpApiSecurity.http({ scheme: "bearer" }).pipe(
-      HttpApiSecurity.annotate(OpenApi.Format, "opaque"),
-    ),
-  },
   error: UnauthorizedResponse,
+  requiredForClient: true,
+  security: {bearer: HttpApiSecurity.http({scheme: "bearer"}).pipe(
+    HttpApiSecurity.annotate(OpenApi.Format, "opaque"),
+  )},
 }) { }
 
 export const ApiAuthorizationLive = Layer.effect(

@@ -12,6 +12,7 @@ import {
   ApiRateLimitLive,
   RequestSchemaErrorLive,
   RequestTimeoutLive,
+  UnexpectedErrorLive,
   requestTimeoutResponse,
   withRequestTimeoutResponse,
 } from "./middleware";
@@ -47,6 +48,7 @@ const BetterAuthRoutes = Layer.unwrap(
 const Routes = Layer.mergeAll(
   ApiRoutes,
   BetterAuthRoutes,
+  UnexpectedErrorLive,
   HttpApiScalar.layer(Api, {
     path: "/docs",
     scalar: { layout: "modern" },
