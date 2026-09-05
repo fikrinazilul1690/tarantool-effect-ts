@@ -1,6 +1,6 @@
 import { Effect, SchemaIssue } from "effect";
 import { HttpApiError, HttpApiMiddleware } from "effect/unstable/httpapi";
-import { ValidationErrorResponse, validationErrorResponse } from "./schemas";
+import { ValidationErrorResponse, validationErrorResponse } from "../schemas";
 
 const formatIssues = SchemaIssue.makeFormatterStandardSchemaV1();
 

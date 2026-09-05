@@ -4,8 +4,8 @@ import {
   HttpApiSecurity,
   OpenApi,
 } from "effect/unstable/httpapi";
-import { BetterAuth } from "../../infrastructure/auth/better-auth";
-import { UnauthorizedResponse, errorResponse } from "./schemas";
+import { BetterAuth } from "../../../infrastructure/auth/better-auth";
+import { UnauthorizedResponse, errorResponse } from "../schemas";
 
 export interface AuthenticatedIdentity {
   readonly user: {

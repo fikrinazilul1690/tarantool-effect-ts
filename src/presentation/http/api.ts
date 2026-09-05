@@ -5,9 +5,7 @@ import {
   HttpApiGroup,
   OpenApi,
 } from "effect/unstable/httpapi";
-import { ApiAuthorization } from "./auth-middleware";
-import { RequestSchemaError } from "./schema-error-middleware";
-import { ApiRateLimit } from "./rate-limit-middleware";
+import { ApiAuthorization, ApiRateLimit, RequestSchemaError, RequestTimeout } from "./middleware";
 import {
   HealthSuccess,
   InternalErrorResponse,
@@ -53,6 +51,7 @@ export class Api extends HttpApi.make("learn-tarantool-api")
   .add(UsersApi)
   .middleware(RequestSchemaError)
   .middleware(ApiRateLimit)
+  .middleware(RequestTimeout)
   .annotateMerge(
     OpenApi.annotations({
       title: "Learn Tarantool API",

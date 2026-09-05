@@ -1,8 +1,8 @@
 import {Effect, Layer} from 'effect';
 import {HttpApiMiddleware} from 'effect/unstable/httpapi';
 import {RateLimiter} from 'effect/unstable/persistence';
-import {AppConfig} from '../../infrastructure/config';
-import {RateLimitedResponse, errorResponse} from './schemas';
+import {AppConfig} from '../../../infrastructure/config';
+import {RateLimitedResponse, errorResponse} from '../schemas';
 
 export class ApiRateLimit extends HttpApiMiddleware.Service<
   ApiRateLimit,
