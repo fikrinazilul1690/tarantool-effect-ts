@@ -8,7 +8,7 @@ export class ConfigError extends Data.TaggedError('ConfigError')<{
 
 export interface AppConfigShape {
   readonly tarantool: TarantoolClientConfig;
-  readonly http: {readonly port: number; readonly requestTimeoutMs: number; readonly gracefulShutdownMs: number};
+  readonly http: {readonly port: number; readonly requestTimeoutMs: number; readonly gracefulShutdownMs: number; readonly rateLimitPerWindow: number; readonly rateLimitWindowMs: number};
   readonly auth: {readonly baseUrl: string; readonly secret: string; readonly appOrigin: string; readonly debug: boolean};
   readonly email: {
     readonly deliveryEnabled: boolean;
@@ -60,6 +60,8 @@ const AppConfigSchema = Schema.Struct({
     port: Port,
     requestTimeoutMs: BoundedInteger(100, 300_000),
     gracefulShutdownMs: BoundedInteger(100, 300_000),
+    rateLimitPerWindow: BoundedInteger(1, 1_000_000),
+    rateLimitWindowMs: BoundedInteger(100, 300_000),
   }),
   auth: Schema.Struct({
     baseUrl: NonEmptyTrimmedString,
@@ -132,6 +134,8 @@ const EnvironmentConfig = Config.all({
   circuitResetMs: integer('TARANTOOL_CIRCUIT_RESET_MS', 5_000, 100, 300_000),
   operationTimeoutMs: integer('TARANTOOL_OPERATION_TIMEOUT_MS', 4_000, 100, 300_000),
   shutdownDrainMs: integer('TARANTOOL_SHUTDOWN_DRAIN_MS', 10_000, 100, 300_000),
+  httpRateLimitPerWindow: integer('HTTP_RATE_LIMIT_PER_WINDOW', 1_000, 1, 1_000_000),
+  httpRateLimitWindowMs: integer('HTTP_RATE_LIMIT_WINDOW_MS', 1_000, 100, 300_000),
   httpPort: withDefault(Config.port('PORT'), 3000),
   httpRequestTimeoutMs: integer('HTTP_REQUEST_TIMEOUT_MS', 5_000, 100, 300_000),
   httpGracefulShutdownMs: integer('HTTP_GRACEFUL_SHUTDOWN_MS', 15_000, 100, 300_000),
@@ -182,6 +186,8 @@ export const AppConfigLive = Layer.effect(
         port: raw.httpPort,
         requestTimeoutMs: raw.httpRequestTimeoutMs,
         gracefulShutdownMs: raw.httpGracefulShutdownMs,
+        rateLimitPerWindow: raw.httpRateLimitPerWindow,
+        rateLimitWindowMs: raw.httpRateLimitWindowMs,
       },
       auth: {
         baseUrl: raw.authBaseUrl.href,

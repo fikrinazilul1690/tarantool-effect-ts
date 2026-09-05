@@ -48,6 +48,7 @@ export const ValidationErrorResponse = Schema.Struct({
   }),
 }).pipe(HttpApiSchema.status(400));
 export const UnauthorizedResponse = ErrorResponse('UNAUTHORIZED').pipe(HttpApiSchema.status(401));
+export const RateLimitedResponse = ErrorResponse('RATE_LIMITED').pipe(HttpApiSchema.status(429));
 export const InternalErrorResponse = ErrorResponse('DATABASE_ERROR').pipe(HttpApiSchema.status(500));
 
 export const errorResponse = <C extends string>(code: C, message: string) => ({

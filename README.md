@@ -115,7 +115,10 @@ See [`docs/TARANTOOL_CLIENT.md`](docs/TARANTOOL_CLIENT.md) for the complete
 availability, retry, deadline, metrics, and lifecycle design. The running
 client keeps one multiplexed
 connection per configured router and applies bounded concurrency, load
-shedding, circuit breaking, and least-loaded router selection.
+shedding, circuit breaking, and least-loaded router selection. The HTTP API
+also applies token-bucket rate limiting with `HTTP_RATE_LIMIT_PER_WINDOW`
+and `HTTP_RATE_LIMIT_WINDOW_MS`; the default in-memory limiter is scoped to
+one API process.
 
 For the complete risk register, target architecture, remediation requirements,
 test program, and release checklist, read
@@ -139,8 +142,9 @@ The API listens on `http://localhost:3000`:
 | `GET /health` | Effect server health check |
 | `GET /metrics` | Tarantool pool saturation, failures, rejections, reconnects, and circuits |
 | `GET /openapi.json` | OpenAPI 3.1 generated from Effect schemas |
+| `GET /docs` | Scalar documentation for Effect HttpApi routes |
 | `GET /api/users?limit=20&cursor=...` | Bearer-protected user objects with a logical ID cursor |
-| `/api/auth/*` | Better Auth endpoints |
+| `/api/auth/*` | Better Auth endpoints, including Scalar OpenAPI reference at `/api/auth/references` |
 
 Public Effect API responses use a consistent envelope:
 

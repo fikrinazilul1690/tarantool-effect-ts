@@ -1,14 +1,23 @@
-import {betterAuth} from 'better-auth/minimal';
-import {bearer} from 'better-auth/plugins/bearer';
-import {Context, Effect, Layer} from 'effect';
-import {AppConfig} from '../config';
-import {Email} from '../email/smtp-email';
-import {TarantoolDb} from '../tarantool/client';
-import {tarantoolAdapter} from './tarantool-adapter';
+import { betterAuth } from "better-auth/minimal";
+import { bearer } from "better-auth/plugins/bearer";
+import { openAPI } from "better-auth/plugins";
+import { Context, Effect, Layer } from "effect";
+import { AppConfig } from "../config";
+import { Email } from "../email/smtp-email";
+import { TarantoolDb } from "../tarantool/client";
+import { tarantoolAdapter } from "./tarantool-adapter";
 
 export interface AuthSession {
-  readonly user: {readonly id: string; readonly name: string; readonly email: string};
-  readonly session: {readonly id: string; readonly token: string; readonly userId: string};
+  readonly user: {
+    readonly id: string;
+    readonly name: string;
+    readonly email: string;
+  };
+  readonly session: {
+    readonly id: string;
+    readonly token: string;
+    readonly userId: string;
+  };
 }
 
 interface Auth {
@@ -17,56 +26,64 @@ interface Auth {
 }
 
 export class BetterAuth extends Context.Service<BetterAuth, Auth>()(
-  'learn-tarantool/BetterAuth',
-) {}
+  "learn-tarantool/BetterAuth",
+) { }
 
 export const BetterAuthLive = Layer.effect(
   BetterAuth,
-  Effect.gen(function*() {
+  Effect.gen(function* () {
     const db = yield* TarantoolDb;
     const email = yield* Email;
-    const {auth: config} = yield* AppConfig;
+    const { auth: config } = yield* AppConfig;
     const auth = betterAuth({
-      appName: 'Learn Tarantool',
+      appName: "Learn Tarantool",
       baseURL: config.baseUrl,
-      basePath: '/api/auth',
+      basePath: "/api/auth",
       secret: config.secret,
       trustedOrigins: [config.appOrigin],
-      database: tarantoolAdapter(db, {debugLogs: config.debug}),
+      database: tarantoolAdapter(db, { debugLogs: config.debug }),
       emailAndPassword: {
         enabled: true,
         requireEmailVerification: true,
-        onExistingUserSignUp: ({user}) => Effect.runPromise(
-          email.sendRegistrationAttempt({
-            to: user.email,
-            name: user.name,
-            attemptedAt: new Date(),
-          }).pipe(
-            // Notification delivery must not reveal account existence through
-            // a different signup response or status code.
-            Effect.catch((cause) => Effect.logError(
-              'Failed to send existing-user registration notification',
-              cause,
-            )),
+        onExistingUserSignUp: ({ user }) =>
+          Effect.runPromise(
+            email
+              .sendRegistrationAttempt({
+                to: user.email,
+                name: user.name,
+                attemptedAt: new Date(),
+              })
+              .pipe(
+                // Notification delivery must not reveal account existence through
+                // a different signup response or status code.
+                Effect.catch((cause) =>
+                  Effect.logError(
+                    "Failed to send existing-user registration notification",
+                    cause,
+                  ),
+                ),
+              ),
           ),
-        ),
       },
       emailVerification: {
         sendOnSignUp: true,
         sendOnSignIn: true,
         autoSignInAfterVerification: true,
         expiresIn: 60 * 60,
-        sendVerificationEmail: ({user, url}) => Effect.runPromise(email.sendVerification({
-          to: user.email,
-          name: user.name,
-          verificationUrl: url,
-        })),
+        sendVerificationEmail: ({ user, url }) =>
+          Effect.runPromise(
+            email.sendVerification({
+              to: user.email,
+              name: user.name,
+              verificationUrl: url,
+            }),
+          ),
       },
-      plugins: [bearer()],
+      plugins: [bearer(), openAPI()],
     });
     return BetterAuth.of({
       handler: (request) => structuredAuthResponse(auth.handler, request),
-      getSession: (headers) => auth.api.getSession({headers}),
+      getSession: (headers) => auth.api.getSession({ headers }),
     });
   }),
 );
@@ -76,11 +93,12 @@ async function structuredAuthResponse(
   request: Request,
 ): Promise<Response> {
   const response = await handler(request);
-  const contentType = response.headers.get('content-type') ?? '';
+  const contentType = response.headers.get("content-type") ?? "";
 
   // Redirects (including verify-email callbacks), empty responses, and
   // non-JSON payloads must retain Better Auth's native protocol semantics.
-  if (!contentType.includes('application/json') || response.status === 204) return response;
+  if (!contentType.includes("application/json") || response.status === 204)
+    return response;
 
   let body: unknown;
   try {
@@ -90,11 +108,11 @@ async function structuredAuthResponse(
   }
 
   const payload = response.ok
-    ? {success: true as const, data: body}
-    : {success: false as const, error: authError(body, response)};
+    ? { success: true as const, data: body }
+    : { success: false as const, error: authError(body, response) };
   const headers = new Headers(response.headers);
-  headers.delete('content-length');
-  headers.set('content-type', 'application/json');
+  headers.delete("content-length");
+  headers.set("content-type", "application/json");
 
   return new Response(JSON.stringify(payload), {
     status: response.status,
@@ -103,13 +121,20 @@ async function structuredAuthResponse(
   });
 }
 
-function authError(body: unknown, response: Response): {code: string; message: string} {
-  if (typeof body === 'object' && body !== null) {
+function authError(
+  body: unknown,
+  response: Response,
+): { code: string; message: string } {
+  if (typeof body === "object" && body !== null) {
     const value = body as Record<string, unknown>;
     return {
-      code: typeof value.code === 'string' ? value.code : 'AUTH_ERROR',
-      message: typeof value.message === 'string' ? value.message : response.statusText,
+      code: typeof value.code === "string" ? value.code : "AUTH_ERROR",
+      message:
+        typeof value.message === "string" ? value.message : response.statusText,
     };
   }
-  return {code: 'AUTH_ERROR', message: response.statusText || 'Authentication request failed'};
+  return {
+    code: "AUTH_ERROR",
+    message: response.statusText || "Authentication request failed",
+  };
 }

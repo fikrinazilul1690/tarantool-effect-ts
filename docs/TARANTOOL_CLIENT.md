@@ -25,7 +25,10 @@ when none are reachable.
 Effect application
        |
        v
-TarantoolDbLive / RouterPool
+TarantoolDbLive
+       |
+       v
+Effect RouterPool service
        |
        +-- router A connection --> vshard --> storage replica set
        |
@@ -60,6 +63,14 @@ The client does not queue beyond these limits. It immediately fails with
 `TarantoolError.kind = overloaded`, allowing the HTTP layer to shed work rather
 than consuming unbounded memory or increasing tail latency.
 
+The HTTP API applies an Effect `RateLimiter` token bucket before a request can
+reach the database. `HTTP_RATE_LIMIT_PER_WINDOW` sets the bucket capacity
+and `HTTP_RATE_LIMIT_WINDOW_MS` controls its refill interval. The limiter
+is process-local (`RateLimiter.layerStoreMemory`) and fails immediately with
+HTTP 429 when no token is available; it does not create an unbounded wait queue.
+Use a shared `RateLimiterStore` (for example, backed by Redis) when a limit must
+cover multiple API processes.
+
 ## Circuit breaker and reconnection
 
 Connection-establishment and classified transport failures increment the
@@ -74,7 +85,9 @@ failed probe reopens it.
 Failed connections are discarded and recreated on demand. The client cancels
 `tarantool-driver`'s internal reconnect scheduling so it cannot bypass circuit
 cooldowns or create an orphan connection. Reconnection and endpoint selection
-belong exclusively to `RouterPool`.
+belong exclusively to the scoped `RouterPool` service. The Promise-based
+connector is isolated in a private driver adapter and never escapes into
+application services.
 
 `enableOfflineQueue` is disabled. A command must never remain hidden in the
 driver and execute later after the application has already treated it as
@@ -132,8 +145,9 @@ Lua procedures must also remain bounded and cooperative.
 validates it with Effect Schema once at composition time. This keeps production
 environment loading and deterministic in-memory test providers behind the same
 service boundary.
-`TarantoolDbLive` consumes its Tarantool section, and
-`makeTarantoolDbLayer()` constructs the service with `Effect.acquireRelease`:
+`TarantoolDbLive` consumes its Tarantool section. `makeTarantoolDbLayer()`
+provides a scoped `RouterPool` Effect service to `TarantoolDb`; the pool uses
+`Effect.acquireRelease` for its private driver adapter:
 
 - acquire and validate configuration;
 - connect to all router endpoints concurrently;
@@ -142,6 +156,10 @@ service boundary.
 - reject new operations and wait for in-flight work up to
   `TARANTOOL_SHUTDOWN_DRAIN_MS`;
 - disconnect all remaining sockets.
+
+Only the `tarantool-driver` calls use Promises. The service boundary exposes
+Effect values, so typed failures, scope ownership, and finalization remain in
+the Effect layer graph.
 
 The Bun HTTP server owns listener shutdown. Its graceful timeout is longer than
 the database drain budget, so dependency finalization has time to finish.

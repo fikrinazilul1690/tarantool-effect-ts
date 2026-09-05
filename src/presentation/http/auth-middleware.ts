@@ -1,7 +1,11 @@
-import {Context, Effect, Layer, Redacted} from 'effect';
-import {HttpApiMiddleware, HttpApiSecurity} from 'effect/unstable/httpapi';
-import {BetterAuth} from '../../infrastructure/auth/better-auth';
-import {UnauthorizedResponse, errorResponse} from './schemas';
+import { Context, Effect, Layer, Redacted } from "effect";
+import {
+  HttpApiMiddleware,
+  HttpApiSecurity,
+  OpenApi,
+} from "effect/unstable/httpapi";
+import { BetterAuth } from "../../infrastructure/auth/better-auth";
+import { UnauthorizedResponse, errorResponse } from "./schemas";
 
 export interface AuthenticatedIdentity {
   readonly user: {
@@ -16,33 +20,46 @@ export interface AuthenticatedIdentity {
   };
 }
 
-export class CurrentIdentity extends Context.Service<CurrentIdentity, AuthenticatedIdentity>()(
-  'learn-tarantool/api/CurrentIdentity',
-) {}
+export class CurrentIdentity extends Context.Service<
+  CurrentIdentity,
+  AuthenticatedIdentity
+>()("learn-tarantool/api/CurrentIdentity") { }
 
-export class ApiAuthorization extends HttpApiMiddleware.Service<ApiAuthorization, {
-  provides: CurrentIdentity;
-  requires: BetterAuth;
-}>()('learn-tarantool/api/Authorization', {
+export class ApiAuthorization extends HttpApiMiddleware.Service<
+  ApiAuthorization,
+  {
+    provides: CurrentIdentity;
+    requires: BetterAuth;
+  }
+>()("learn-tarantool/api/Authorization", {
   requiredForClient: true,
-  security: {bearer: HttpApiSecurity.bearer},
+  security: {
+    bearer: HttpApiSecurity.http({ scheme: "bearer" }).pipe(
+      HttpApiSecurity.annotate(OpenApi.Format, "opaque"),
+    ),
+  },
   error: UnauthorizedResponse,
-}) {}
+}) { }
 
 export const ApiAuthorizationLive = Layer.effect(
   ApiAuthorization,
-  Effect.gen(function*() {
+  Effect.gen(function* () {
     const auth = yield* BetterAuth;
     return ApiAuthorization.of({
-      bearer: Effect.fn(function*(httpEffect, {credential}) {
+      bearer: Effect.fn(function* (httpEffect, { credential }) {
         const token = Redacted.value(credential);
         const identity = yield* Effect.promise(() =>
-          auth.getSession(new Headers({authorization: `Bearer ${token}`})).catch(() => null));
+          auth
+            .getSession(new Headers({ authorization: `Bearer ${token}` }))
+            .catch(() => null),
+        );
         if (identity === null) {
-          return yield* Effect.fail(errorResponse(
-            'UNAUTHORIZED',
-            'Missing, expired, or invalid bearer token',
-          ));
+          return yield* Effect.fail(
+            errorResponse(
+              "UNAUTHORIZED",
+              "Missing, expired, or invalid bearer token",
+            ),
+          );
         }
         return yield* Effect.provideService(
           httpEffect,

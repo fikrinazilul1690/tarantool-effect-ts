@@ -1,8 +1,8 @@
 import TarantoolConnection from "tarantool-driver";
 import { Context, Data, Effect, Layer, Schema } from "effect";
-import {AppConfig, defaultTarantoolClientConfig} from '../config';
+import { AppConfig, defaultTarantoolClientConfig } from "../config";
 
-export {parseRouters} from '../config';
+export { parseRouters } from "../config";
 
 export type TarantoolErrorKind =
   "configuration" | "unavailable" | "overloaded" | "transport" | "response";
@@ -90,7 +90,7 @@ class OperationTimeoutError extends Error {
   readonly code = "ETIMEDOUT";
 }
 
-class RouterPool {
+class RouterPoolDriver {
   private readonly slots: Array<RouterSlot>;
   private globalInFlight = 0;
   private selectionCursor = 0;
@@ -156,9 +156,10 @@ class RouterPool {
   async ping(): Promise<void> {
     await this.withRouter(
       "ping",
-      (connection) => (connection as TarantoolConnection & RuntimeTarantoolCommands)
-        .ping()
-        .then(() => undefined),
+      (connection) =>
+        (connection as TarantoolConnection & RuntimeTarantoolCommands)
+          .ping()
+          .then(() => undefined),
       true,
     );
   }
@@ -368,60 +369,97 @@ class RouterPool {
   }
 }
 
+interface RouterPoolShape {
+  readonly ping: Effect.Effect<void, TarantoolError>;
+  readonly status: Effect.Effect<ReadonlyArray<TarantoolRouterStatus>>;
+  readonly call: (
+    name: string,
+    args: ReadonlyArray<unknown>,
+  ) => Effect.Effect<unknown, TarantoolError>;
+  readonly callReadonly: (
+    name: string,
+    args: ReadonlyArray<unknown>,
+  ) => Effect.Effect<unknown, TarantoolError>;
+}
+
+class RouterPool extends Context.Service<RouterPool, RouterPoolShape>()(
+  "learn-tarantool/RouterPool",
+) { }
+
+const makeRouterPoolLayer = (overrides: Partial<TarantoolClientConfig>) =>
+  Layer.effect(
+    RouterPool,
+    Effect.gen(function* () {
+      const config = yield* Effect.try({
+        try: () =>
+          validateConfig({
+            ...defaultTarantoolClientConfig,
+            ...overrides,
+          }),
+        catch: (cause) =>
+          new TarantoolError({
+            operation: "configure",
+            kind: "configuration",
+            cause,
+          }),
+      });
+      const driver = yield* Effect.acquireRelease(
+        Effect.sync(() => new RouterPoolDriver(config)),
+        (driver) => Effect.promise(() => driver.drainAndClose()),
+      );
+      yield* Effect.tryPromise({
+        try: () => driver.warm(),
+        catch: (cause) =>
+          new TarantoolError({
+            operation: "connect",
+            kind: "unavailable",
+            cause,
+          }),
+      });
+
+      const call = (
+        name: string,
+        args: ReadonlyArray<unknown>,
+        readonly: boolean,
+      ) =>
+        Effect.tryPromise({
+          try: () =>
+            readonly
+              ? driver.callReadonly(name, args)
+              : driver.call(name, args),
+          catch: (cause) => asTarantoolError(`call ${name}`, cause),
+        });
+
+      return RouterPool.of({
+        ping: Effect.tryPromise({
+            try: () => driver.ping(),
+            catch: (cause) => asTarantoolError("ping", cause),
+          }),
+        status: Effect.sync(() => driver.status()),
+        call: (name, args) =>
+          call(name, args, false),
+        callReadonly: (name, args) =>
+          call(name, args, true),
+      });
+    }),
+  );
+
 export const makeTarantoolDbLayer = (
   overrides: Partial<TarantoolClientConfig> = {},
 ) =>
   Layer.effect(
     TarantoolDb,
-    Effect.acquireRelease(
-      Effect.tryPromise({
-        try: async () => {
-          let config: TarantoolClientConfig;
-          try {
-            config = validateConfig({ ...defaultTarantoolClientConfig, ...overrides });
-          } catch (cause) {
-            throw new TarantoolError({
-              operation: "configure",
-              kind: "configuration",
-              cause,
-            });
-          }
-          const pool = new RouterPool(config);
-          try {
-            await pool.warm();
-          } catch (cause) {
-            await pool.drainAndClose();
-            throw new TarantoolError({
-              operation: "connect",
-              kind: "unavailable",
-              cause,
-            });
-          }
-          return pool;
-        },
-        catch: (cause) =>
-          cause instanceof TarantoolError
-            ? cause
-            : new TarantoolError({operation: "connect", kind: "unavailable", cause}),
-      }),
-      (pool) => Effect.promise(() => pool.drainAndClose()),
-    ).pipe(
+    RouterPool.pipe(
       Effect.map((pool): TarantoolDbShape =>
         TarantoolDb.of({
-          ping: Effect.tryPromise({
-            try: () => pool.ping(),
-            catch: (cause) => asTarantoolError("ping", cause),
-          }),
-          status: Effect.sync(() => pool.status()),
+          ping: pool.ping,
+          status: pool.status,
           call: <A>(
             schema: Schema.ConstraintDecoder<A>,
             name: string,
             ...args: ReadonlyArray<unknown>
           ) =>
-            Effect.tryPromise({
-              try: () => pool.call(name, args),
-              catch: (cause) => asTarantoolError(`call ${name}`, cause),
-            }).pipe(
+            pool.call(name, args).pipe(
               Effect.flatMap((response) => decodeEnvelope(schema, response)),
               Effect.mapError((cause) =>
                 cause instanceof TarantoolError
@@ -438,10 +476,7 @@ export const makeTarantoolDbLayer = (
             name: string,
             ...args: ReadonlyArray<unknown>
           ) =>
-            Effect.tryPromise({
-              try: () => pool.callReadonly(name, args),
-              catch: (cause) => asTarantoolError(`call ${name}`, cause),
-            }).pipe(
+            pool.callReadonly(name, args).pipe(
               Effect.flatMap((response) => decodeEnvelope(schema, response)),
               Effect.mapError((cause) =>
                 cause instanceof TarantoolError
@@ -456,10 +491,12 @@ export const makeTarantoolDbLayer = (
         }),
       ),
     ),
+  ).pipe(
+    Layer.provide(makeRouterPoolLayer(overrides)),
   );
 
 export const TarantoolDbLive = Layer.unwrap(
-  Effect.map(AppConfig, ({tarantool}) => makeTarantoolDbLayer(tarantool)),
+  Effect.map(AppConfig, ({ tarantool }) => makeTarantoolDbLayer(tarantool)),
 );
 
 function validateConfig(config: TarantoolClientConfig): TarantoolClientConfig {

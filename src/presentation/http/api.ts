@@ -7,6 +7,7 @@ import {
 } from "effect/unstable/httpapi";
 import { ApiAuthorization } from "./auth-middleware";
 import { RequestSchemaError } from "./schema-error-middleware";
+import { ApiRateLimit } from "./rate-limit-middleware";
 import {
   HealthSuccess,
   InternalErrorResponse,
@@ -16,15 +17,17 @@ import {
 
 export class SystemApi extends HttpApiGroup.make("system", {
   topLevel: true,
-}).add(
-  HttpApiEndpoint.get("health", "/health", {
-    success: HealthSuccess,
-  }),
-).add(
-  HttpApiEndpoint.get("metrics", "/metrics", {
-    success: MetricsSuccess,
-  }),
-) { }
+})
+  .add(
+    HttpApiEndpoint.get("health", "/health", {
+      success: HealthSuccess,
+    }),
+  )
+  .add(
+    HttpApiEndpoint.get("metrics", "/metrics", {
+      success: MetricsSuccess,
+    }),
+  ) { }
 
 export class UsersApi extends HttpApiGroup.make("users")
   .add(
@@ -49,6 +52,7 @@ export class Api extends HttpApi.make("learn-tarantool-api")
   .add(SystemApi)
   .add(UsersApi)
   .middleware(RequestSchemaError)
+  .middleware(ApiRateLimit)
   .annotateMerge(
     OpenApi.annotations({
       title: "Learn Tarantool API",
