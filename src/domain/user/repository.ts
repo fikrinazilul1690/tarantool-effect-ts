@@ -10,6 +10,10 @@ export class UserRepositoryError extends Data.TaggedError(
 
 export interface UserRepositoryShape {
   readonly list: (
+    filters: {
+      readonly age?: number;
+      readonly createdAt?: number;
+    },
     cursor: string | null,
     limit: number,
   ) => Effect.Effect<CursorPage<User>, UserRepositoryError>;

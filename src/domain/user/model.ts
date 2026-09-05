@@ -36,7 +36,7 @@ export interface CursorPage<T> {
   readonly items: ReadonlyArray<T>;
   readonly next_cursor: string | null;
   readonly has_more: boolean;
-  readonly totalPage: number;
+  readonly totalPage: number | null;
   readonly currentPage: number;
 }
 
@@ -46,7 +46,7 @@ export class UserCursorPage extends Schema.Class<UserCursorPage>(
   items: Schema.Array(User),
   next_cursor: Schema.NullOr(Schema.String),
   has_more: Schema.Boolean,
-  totalPage: Schema.Number,
+  totalPage: Schema.NullOr(Schema.Number),
   currentPage: Schema.Number,
 }) { }
 export const UserCursorPageSchema = UserCursorPage;

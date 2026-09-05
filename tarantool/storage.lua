@@ -417,6 +417,47 @@ box.once("users-bucket-age-index-v1", function()
 	})
 end)
 
+-- Age-filtered pagination is ordered by the non-unique age field and then by
+-- the primary key. The primary key tie-breaker makes every position unique.
+box.once("users-age-id-index-v2", function()
+	box.space.users:create_index("age_id", {
+		parts = {
+			{ field = "age", type = "unsigned" },
+			{ field = "id", type = "unsigned" },
+		},
+		unique = true,
+		if_not_exists = true,
+	})
+end)
+
+-- The default user stream is ordered by the immutable creation timestamp and
+-- primary key. created_at has second precision, so id is required as a stable
+-- tie-breaker when several users are created during the same second.
+box.once("users-created-at-id-index-v1", function()
+	box.space.users:create_index("created_at_id", {
+		parts = {
+			{ field = "created_at", type = "unsigned" },
+			{ field = "id", type = "unsigned" },
+		},
+		unique = true,
+		if_not_exists = true,
+	})
+end)
+
+-- When both exact filters are present, this index avoids scanning either all
+-- users of an age or all users created at a timestamp.
+box.once("users-age-created-at-id-index-v1", function()
+	box.space.users:create_index("age_created_at_id", {
+		parts = {
+			{ field = "age", type = "unsigned" },
+			{ field = "created_at", type = "unsigned" },
+			{ field = "id", type = "unsigned" },
+		},
+		unique = true,
+		if_not_exists = true,
+	})
+end)
+
 -- vshard tuple moves also execute on_replace, so each storage's O(1) counter
 -- remains correct as buckets enter or leave during rebalancing.
 box.space.users:on_replace(
@@ -529,10 +570,11 @@ function storage_api.users_by_age(bucket_id, minimum_age, limit)
 	return result
 end
 
+---@param last_created_at integer
 ---@param last_id integer
 ---@param limit integer
-function storage_api.users_page_fragment(last_id, limit)
-	local tuples = box.space.users.index.primary:select({ last_id }, {
+function storage_api.users_page_fragment(last_created_at, last_id, limit)
+	local tuples = box.space.users.index.created_at_id:select({ last_created_at, last_id }, {
 		iterator = "GT",
 		limit = limit,
 	})

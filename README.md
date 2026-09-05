@@ -143,7 +143,7 @@ The API listens on `http://localhost:3000`:
 | `GET /metrics` | Tarantool pool saturation, failures, rejections, reconnects, and circuits |
 | `GET /openapi.json` | OpenAPI 3.1 generated from Effect schemas |
 | `GET /docs` | Scalar documentation for Effect HttpApi routes |
-| `GET /api/users?limit=20&cursor=...` | Bearer-protected user objects with a logical ID cursor |
+| `GET /api/users?limit=20&cursor=...&age=21&createdAt=...` | Bearer-protected user list with optional exact `age` and `createdAt` filters |
 | `/api/auth/*` | Better Auth endpoints, including Scalar OpenAPI reference at `/api/auth/references` |
 
 Public Effect API responses use a consistent envelope:
@@ -216,9 +216,10 @@ environment:
 - `postman/Learn-Tarantool.postman_collection.json`
 - `postman/Local.postman_environment.json`
 
-The collection contains health, OpenAPI, pagination, email verification, and
-session requests. Run **List Users - First Page** before
-**List Users - Next Page** so its test script saves `next_cursor`. First run
+The collection contains health, OpenAPI, unfiltered pagination, all three
+filter combinations, email verification, and session requests. Run
+**List Users - First Page** before **List Users - Next Page** so its test script
+saves the cursor. First run
 **Sign In with Email** after verifying the account to save `sessionToken`; user
 requests send it as a bearer token. Clear the collection's `authEmail` variable
 to generate a new unique account on the next sign-up.
@@ -362,10 +363,17 @@ Its indexes are:
 - `bucket_id`: non-unique TREE index required by vshard
 - `email`: unique TREE secondary index
 - `age`: non-unique TREE secondary index for range queries
+- `age_id`: unique TREE index on `[age, id]` for age-filtered pagination
+- `created_at_id`: unique TREE index on `[created_at, id]` for the default list
+- `age_created_at_id`: unique TREE index on `[age, created_at, id]` when both filters are present
 
 Every sharded tuple must contain its bucket ID. Do not connect to a storage and
 insert a tuple directly from an application: doing that bypasses routing and
 can put data on the wrong shard.
+
+For guidance on co-locating users with personal posts while keeping
+organizations and membership projections safe, see
+[`docs/RELATED_SPACE_SHARDING.md`](docs/RELATED_SPACE_SHARDING.md).
 
 ## Typed application usage
 
@@ -394,11 +402,19 @@ BunRuntime.runMain(program);
 
 ### Cursor-based list API
 
-`api.users_page(cursor, limit)` lists users across every shard. Replica sets are
-queried concurrently and the router merges users in ascending ID order. The
-first cursor is `null`; pass `next_cursor` unchanged to the next request. The
-cursor contains only the last logical user ID and page number, so it remains
-valid when buckets move between replica sets. Limits must be between 1 and 100.
+`api.users_page(cursor, limit, age, created_at)` lists users across every shard.
+The HTTP equivalent is a single `GET /api/users` endpoint. Both filters are
+optional exact matches, so all four indexed query plans are available:
+
+- no filters: ordered by `[created_at, id]`;
+- `age`: filtered and ordered by `[age, id]`;
+- `createdAt`: filtered and ordered by `[created_at, id]`;
+- both: filtered and ordered by `[age, created_at, id]`.
+
+The first cursor is `null`; pass `next_cursor` unchanged with the same filters
+to the next request. The cursor embeds its query mode and filter values, so it
+is rejected if reused with different filters. The logical cursor remains valid
+when buckets move between replica sets. Limits must be between 1 and 100.
 
 ```ts
 const first = yield* db.call<CursorPage<User>>('api.users_page', null, 25);
@@ -416,21 +432,20 @@ Response shape:
   items: User[];
   next_cursor: string | null; // opaque: do not parse or modify it
   has_more: boolean;
-  totalPage: number;
+  totalPage: number | null;
   currentPage: number;
-  lastCursor: null; // retained for compatibility; exact lookup is not O(1)
 }
 ```
 
-`totalPage` is calculated from transactional per-storage counters returned with
-the page fragments. Inserts, deletes, and vshard tuple moves update those
-counters through an `on_replace` trigger in the same transaction. `lastCursor`
-is always `null`: an exact final-page cursor needs an order-statistics index and
-must not be simulated by replaying every page.
+For an unfiltered list, `totalPage` is calculated from transactional
+per-storage counters read concurrently. Inserts, deletes, and vshard tuple
+moves update those counters through an `on_replace` trigger in the same
+transaction. Filtered queries return `totalPage: null`; deriving an exact
+filtered total would require scanning matches or maintaining separate
+aggregates.
 
-Each storage performs a bounded `GT` scan on the primary ID index. The router
-requests `limit + 1` rows concurrently from every replica set, de-duplicates by
-ID (including during bucket movement), sorts, and returns one page. Configure
+CRUD performs bounded scans on `created_at_id`, `age_id`, or
+`age_created_at_id` and merges `limit + 1` rows across replica sets. Configure
 replica `zone` values and the vshard `weights` distance matrix in multi-DC
 deployments; `replicaset:callro` then selects the nearest available node.
 
@@ -510,8 +525,7 @@ blocker still needs implementation and evidence.
 - [x] Route point reads and writes by stable vshard bucket keys.
 - [x] Use logical value-based pagination cursors instead of replica-set UUIDs
       or physical shard indexes.
-- [x] Paginate the current global user stream by its unique primary ID, avoiding
-      ties and physical-topology state.
+- [x] Paginate the default global user stream by immutable `[created_at, id]`.
 - [x] Perform bounded index scans on storage and scatter-gather concurrently
       across shards.
 - [x] Maintain record counters atomically instead of using `space:len()` on
@@ -521,9 +535,9 @@ blocker still needs implementation and evidence.
       and global indexed selection.
 - [x] Pin Tarantool 3.8.0 and CRUD's vshard/checks/errors dependencies to exact
       release versions.
-- [ ] Before adding pagination ordered by `age`, `created_at`, or another
-      non-unique field, implement and test a `[secondary_value, primary_id]`
-      cursor.
+- [x] Implement and test a `[secondary_value, primary_id]` cursor for pagination
+      filtered and ordered by the non-unique `age` field, plus an indexed
+      `[age, created_at, id]` plan for combined filters.
 - [x] Enforce cluster-wide uniqueness for normalized Better Auth user emails,
       session tokens, and `[providerId, accountId]`, with concurrent race tests.
 - [ ] Provide rollback/reconciliation guarantees for Better Auth workflows that

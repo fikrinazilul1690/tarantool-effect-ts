@@ -45,6 +45,18 @@ export class UsersApi extends HttpApiGroup.make("users")
           ),
         ),
         cursor: Schema.optional(Schema.String),
+        age: Schema.optional(
+          Schema.NumberFromString.check(
+            Schema.isInt(),
+            Schema.isGreaterThanOrEqualTo(0),
+          ),
+        ),
+        createdAt: Schema.optional(
+          Schema.NumberFromString.check(
+            Schema.isInt(),
+            Schema.isGreaterThanOrEqualTo(0),
+          ),
+        ),
       },
       success: ListUsersSuccess,
       error: InternalErrorResponse,

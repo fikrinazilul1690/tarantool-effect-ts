@@ -47,7 +47,11 @@ export const UsersHandlers = HttpApiBuilder.group(
         const limit = query.limit ?? 20;
         const identity = yield* CurrentIdentity;
         yield* Effect.logInfo(identity);
-        return yield* users.list(query.cursor ?? null, limit).pipe(
+        return yield* users.list(
+          { age: query.age, createdAt: query.createdAt },
+          query.cursor ?? null,
+          limit,
+        ).pipe(
           Effect.map((page) => ListUsersSuccess.make({ data: page })),
           Effect.mapError(() =>
             errorResponse("DATABASE_ERROR", "Unable to list users"),

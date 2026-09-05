@@ -285,13 +285,19 @@ Required work:
 
 ### Pagination and distributed consistency
 
-The logical ID cursor survives topology changes and avoids physical shard
-positions, but it is not a distributed snapshot. During traversal:
+The unified list API uses logical `[created_at, id]`, `[age, id]`, or
+`[age, created_at, id]` cursors according to its exact filters. These cursors
+survive topology changes, deterministically order duplicate secondary values,
+and avoid physical shard positions. Each filtered cursor is bound to its
+original filter values, so changing a filter requires a new traversal. None of
+the cursor modes is a distributed snapshot. During traversal:
 
 - inserts below the cursor are not observed;
 - inserts above it may appear;
 - deletes remove records that a prior count included;
-- `totalPage` can change between requests;
+- the default list's `totalPage` can change between requests;
+- filtered lists return a null exact total rather than scanning all matching
+  records;
 - reads from replicas may reflect different replication points.
 
 Required work:
@@ -388,7 +394,7 @@ Create runbooks for every alert and assign an owner and escalation path.
 ## Tarantool CRUD architecture
 
 CRUD 1.7.5 is initialized on every router and storage. Generic user
-create/get/update/delete operations and global primary-ID selection use CRUD.
+create/get/update/delete operations and global indexed selection use CRUD.
 This replaces hand-written point routing and page-fragment merge logic with
 schema-aware routing, yielding, replica preferences, and rebalance-aware
 scatter/merge.

@@ -1,6 +1,10 @@
 import {BunRuntime} from '@effect/platform-bun';
 import {Effect} from 'effect';
-import {UserCursorPageSchema, UserSchema, type UserCursorPage} from '../src/domain/user/model';
+import {
+  UserCursorPageSchema,
+  UserSchema,
+  type UserCursorPage,
+} from '../src/domain/user/model';
 import {AppConfigLive} from '../src/infrastructure/config';
 import {TarantoolDb, TarantoolDbLive} from '../src/infrastructure/tarantool/client';
 
@@ -22,6 +26,20 @@ const program = Effect.gen(function*() {
     cursor = page.next_cursor;
     pageNumber += 1;
   } while (cursor !== null);
+
+  let ageCursor: string | null = null;
+  do {
+    const page: UserCursorPage = yield* db.call(
+      UserCursorPageSchema,
+      'api.users_page',
+      ageCursor,
+      10,
+      23,
+      null,
+    );
+    yield* Effect.sync(() => console.dir({age: 23, ageCursor, ...page}, {depth: null}));
+    ageCursor = page.next_cursor;
+  } while (ageCursor !== null);
 }).pipe(Effect.provide(TarantoolDbLive), Effect.provide(AppConfigLive));
 
 BunRuntime.runMain(program);

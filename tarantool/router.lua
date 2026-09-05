@@ -22,7 +22,7 @@ local crud = require("crud")
 ---@field items User[]
 ---@field next_cursor string|userdata
 ---@field has_more boolean
----@field totalPage integer
+---@field totalPage integer|userdata
 ---@field currentPage integer
 
 ---@class CrudMetadata
@@ -213,21 +213,57 @@ local function replicasets()
 	return result
 end
 
+---@param value? integer|userdata
+---@param name string
+---@return integer?
+local function optional_unsigned(value, name)
+	if value == nil or value == box.NULL then
+		return nil
+	end
+	if type(value) ~= "number" or value % 1 ~= 0 or value < 0 then
+		error(name .. " must be a non-negative integer")
+	end
+	return value
+end
+
 ---@param cursor? string|userdata
+---@param age? integer
+---@param created_at? integer
+---@return integer? last_created_at
 ---@return integer last_id
 ---@return integer current_page
-local function decode_cursor(cursor)
+local function decode_user_cursor(cursor, age, created_at)
 	if cursor == nil or cursor == box.NULL or cursor == "" then
-		return 0, 1
+		return nil, 0, 1
 	end
 	if type(cursor) ~= "string" then
 		error("invalid cursor")
 	end
-	local page_number, last_id = string.match(cursor, "^v1:(%d+):(%d+)$")
-	if page_number == nil then
+	if age ~= nil and created_at ~= nil then
+		local cursor_age, cursor_created_at, last_id, page_number =
+			string.match(cursor, "^uac1:(%d+):(%d+):(%d+):(%d+)$")
+		if tonumber(cursor_age) ~= age or tonumber(cursor_created_at) ~= created_at then
+			error("cursor does not match user filters")
+		end
+		return created_at, assert(tonumber(last_id)), assert(tonumber(page_number))
+	elseif age ~= nil then
+		local cursor_age, last_id, page_number = string.match(cursor, "^ua1:(%d+):(%d+):(%d+)$")
+		if tonumber(cursor_age) ~= age then
+			error("cursor does not match age filter")
+		end
+		return nil, assert(tonumber(last_id)), assert(tonumber(page_number))
+	elseif created_at ~= nil then
+		local cursor_created_at, last_id, page_number = string.match(cursor, "^uc1:(%d+):(%d+):(%d+)$")
+		if tonumber(cursor_created_at) ~= created_at then
+			error("cursor does not match createdAt filter")
+		end
+		return created_at, assert(tonumber(last_id)), assert(tonumber(page_number))
+	end
+	local last_created_at, last_id, page_number = string.match(cursor, "^u1:(%d+):(%d+):(%d+)$")
+	if last_created_at == nil then
 		error("invalid cursor")
 	end
-	return assert(tonumber(last_id)), assert(tonumber(page_number))
+	return assert(tonumber(last_created_at)), assert(tonumber(last_id)), assert(tonumber(page_number))
 end
 
 ---@param mode 'read'|'write'
@@ -279,16 +315,46 @@ end
 
 ---@param cursor? string|userdata
 ---@param requested_limit? integer
-function api.users_page(cursor, requested_limit)
+---@param requested_age? integer|userdata
+---@param requested_created_at? integer|userdata
+function api.users_page(cursor, requested_limit, requested_age, requested_created_at)
 	local limit = requested_limit or 20
 	if type(limit) ~= "number" or limit % 1 ~= 0 or limit < 1 or limit > 100 then
 		error("limit must be an integer between 1 and 100")
 	end
 
-	local last_id, current_page = decode_cursor(cursor)
-	local selected, select_err = crud.select("users", nil, {
+	local age = optional_unsigned(requested_age, "age")
+	local created_at = optional_unsigned(requested_created_at, "createdAt")
+	local last_created_at, last_id, current_page = decode_user_cursor(cursor, age, created_at)
+	local has_cursor = cursor ~= nil and cursor ~= box.NULL and cursor ~= ""
+	local conditions
+	local after = nil
+	if age ~= nil and created_at ~= nil then
+		conditions = { { "=", "age_created_at_id", { age, created_at } } }
+		if has_cursor then
+			after = { last_id, 0, "", "", age, created_at }
+		end
+	elseif age ~= nil then
+		conditions = { { "=", "age_id", { age } } }
+		if has_cursor then
+			after = { last_id, 0, "", "", age, 0 }
+		end
+	elseif created_at ~= nil then
+		conditions = { { "=", "created_at_id", { created_at } } }
+		if has_cursor then
+			after = { last_id, 0, "", "", 0, created_at }
+		end
+	else
+		conditions = { { ">=", "created_at_id", { 0, 0 } } }
+		if last_created_at ~= nil then
+			-- CRUD's cursor is a full space-format tuple. Only created_at and id
+			-- participate in this index; placeholder fields are not exposed.
+			after = { last_id, 0, "", "", 0, last_created_at }
+		end
+	end
+	local selected, select_err = crud.select("users", conditions, {
 		first = limit + 1,
-		after = { last_id },
+		after = after,
 		timeout = common.read_timeout,
 		request_timeout = common.read_timeout,
 		mode = "read",
@@ -301,9 +367,13 @@ function api.users_page(cursor, requested_limit)
 	end
 
 	local merged = crud_objects(selected)
-	local total = 0
-	for _, count in ipairs(scatter_callro("storage_api.users_total", {})) do
-		total = total + count
+	local total_pages = box.NULL
+	if age == nil and created_at == nil then
+		local total = 0
+		for _, count in ipairs(scatter_callro("storage_api.users_total", {})) do
+			total = total + count
+		end
+		total_pages = math.ceil(total / limit)
 	end
 
 	local has_more = #merged > limit
@@ -312,10 +382,18 @@ function api.users_page(cursor, requested_limit)
 	end
 	local next_cursor = box.NULL
 	if has_more then
-		next_cursor = "v1:" .. (current_page + 1) .. ":" .. merged[#merged].id
+		local last = merged[#merged]
+		if age ~= nil and created_at ~= nil then
+			next_cursor = "uac1:" .. age .. ":" .. created_at .. ":" .. last.id .. ":" .. (current_page + 1)
+		elseif age ~= nil then
+			next_cursor = "ua1:" .. age .. ":" .. last.id .. ":" .. (current_page + 1)
+		elseif created_at ~= nil then
+			next_cursor = "uc1:" .. created_at .. ":" .. last.id .. ":" .. (current_page + 1)
+		else
+			next_cursor = "u1:" .. last.created_at .. ":" .. last.id .. ":" .. (current_page + 1)
+		end
 	end
 
-	local total_pages = math.ceil(total / limit)
 	return {
 		items = merged,
 		next_cursor = next_cursor,

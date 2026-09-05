@@ -75,17 +75,225 @@ test("logical cursor pagination traverses all shards without duplicates", () =>
           17,
         );
         expect(page.currentPage).toBe(expectedPage);
-        expect(page.totalPage).toBeGreaterThanOrEqual(page.currentPage);
+        expect(page.totalPage).not.toBeNull();
+        expect(page.totalPage ?? 0).toBeGreaterThanOrEqual(page.currentPage);
         seenIds.push(...page.items.map(({ id }) => id));
         cursor = page.next_cursor;
         if (cursor !== null) {
-          expect(cursor).toMatch(/^v1:\d+:\d+$/);
+          expect(cursor).toMatch(/^u1:\d+:\d+:\d+$/);
         }
         expectedPage += 1;
       } while (cursor !== null);
 
       expect(new Set(seenIds).size).toBe(seenIds.length);
       for (const id of expectedIds) expect(seenIds).toContain(id);
+    }),
+  ));
+
+test("default cursor preserves users with the same creation timestamp", () =>
+  runDb(
+    Effect.gen(function* () {
+      const db = yield* TarantoolDb;
+      const createdAt = Date.now() + 100_000;
+      const seed = createdAt + 100_000;
+      const expectedIds = Array.from({length: 4}, (_, offset) => seed + offset);
+
+      for (const id of expectedIds) {
+        yield* db.call(UserSchema, "api.user_create", {
+          id,
+          email: `created-cursor-${id}@example.com`,
+          name: `Created cursor ${id}`,
+          age: 30,
+          created_at: createdAt,
+        });
+      }
+
+      let cursor: string | null = `u1:${createdAt}:0:1`;
+      const seenIds: number[] = [];
+      while (cursor !== null && seenIds.length < expectedIds.length) {
+        const page: UserCursorPage = yield* db.call(
+          UserCursorPageSchema,
+          "api.users_page",
+          cursor,
+          2,
+        );
+        expect(page.items.every((user) => user.created_at === createdAt)).toBe(true);
+        seenIds.push(...page.items.map((user) => user.id));
+
+        if (page.next_cursor !== null) {
+          const last = page.items.at(-1);
+          expect(last).toBeDefined();
+          expect(page.next_cursor).toMatch(
+            new RegExp(`^u1:${createdAt}:${last?.id}:\\d+$`),
+          );
+        }
+        cursor = page.next_cursor;
+      }
+
+      expect(seenIds).toEqual(expectedIds);
+      expect(new Set(seenIds).size).toBe(expectedIds.length);
+    }),
+  ));
+
+test("one list API filters by exact age", () =>
+  runDb(
+    Effect.gen(function* () {
+      const db = yield* TarantoolDb;
+      const exactAge = Date.now() + 500_000;
+      const seed = exactAge + 100_000;
+      const expectedIds = Array.from({length: 5}, (_, offset) => seed + offset);
+
+      for (const id of expectedIds) {
+        yield* db.call(UserSchema, "api.user_create", {
+          id,
+          email: `age-cursor-${id}@example.com`,
+          name: `Age cursor ${id}`,
+          age: exactAge,
+        });
+      }
+
+      let cursor: string | null = null;
+      let filterBoundCursor: string | null = null;
+      const seenIds: number[] = [];
+      while (cursor !== null || seenIds.length === 0) {
+        const page: UserCursorPage = yield* db.call(
+          UserCursorPageSchema,
+          "api.users_page",
+          cursor,
+          2,
+          exactAge,
+          null,
+        );
+        expect(page.items.every((user) => user.age === exactAge)).toBe(true);
+        expect(page.totalPage).toBeNull();
+        seenIds.push(...page.items.map((user) => user.id));
+
+        if (page.next_cursor !== null) {
+          filterBoundCursor ??= page.next_cursor;
+          const last = page.items.at(-1);
+          expect(last).toBeDefined();
+          expect(page.next_cursor).toMatch(
+            new RegExp(`^ua1:${exactAge}:${last?.id}:\\d+$`),
+          );
+        }
+        cursor = page.next_cursor;
+      }
+
+      expect(seenIds).toEqual(expectedIds);
+      expect(new Set(seenIds).size).toBe(expectedIds.length);
+      expect(filterBoundCursor).not.toBeNull();
+      const mismatchedFilter = yield* db.call(
+        UserCursorPageSchema,
+        "api.users_page",
+        filterBoundCursor,
+        2,
+        exactAge + 1,
+        null,
+      ).pipe(Effect.exit);
+      expect(mismatchedFilter._tag).toBe("Failure");
+    }),
+  ));
+
+test("one list API filters by exact creation timestamp", () =>
+  runDb(
+    Effect.gen(function* () {
+      const db = yield* TarantoolDb;
+      const createdAt = Date.now() + 900_000;
+      const seed = createdAt + 100_000;
+      const expectedIds = Array.from({length: 5}, (_, offset) => seed + offset);
+
+      for (const [offset, id] of expectedIds.entries()) {
+        yield* db.call(UserSchema, "api.user_create", {
+          id,
+          email: `created-filter-${id}@example.com`,
+          name: `Created filter ${id}`,
+          age: 40 + offset,
+          created_at: createdAt,
+        });
+      }
+
+      let cursor: string | null = null;
+      const seenIds: number[] = [];
+      do {
+        const page: UserCursorPage = yield* db.call(
+          UserCursorPageSchema,
+          "api.users_page",
+          cursor,
+          2,
+          null,
+          createdAt,
+        );
+        expect(page.items.every((user) => user.created_at === createdAt)).toBe(true);
+        expect(page.totalPage).toBeNull();
+        seenIds.push(...page.items.map((user) => user.id));
+        cursor = page.next_cursor;
+        if (cursor !== null) {
+          expect(cursor).toMatch(new RegExp(`^uc1:${createdAt}:\\d+:\\d+$`));
+        }
+      } while (cursor !== null);
+
+      expect(seenIds).toEqual(expectedIds);
+    }),
+  ));
+
+test("one list API combines exact age and creation timestamp filters", () =>
+  runDb(
+    Effect.gen(function* () {
+      const db = yield* TarantoolDb;
+      const age = Date.now() + 1_300_000;
+      const createdAt = Date.now() + 1_400_000;
+      const seed = createdAt + 100_000;
+      const expectedIds = Array.from({length: 5}, (_, offset) => seed + offset);
+
+      for (const id of expectedIds) {
+        yield* db.call(UserSchema, "api.user_create", {
+          id,
+          email: `combined-filter-${id}@example.com`,
+          name: `Combined filter ${id}`,
+          age,
+          created_at: createdAt,
+        });
+      }
+      yield* db.call(UserSchema, "api.user_create", {
+        id: seed + 10,
+        email: `combined-age-decoy-${seed}@example.com`,
+        name: "Combined age decoy",
+        age: age + 1,
+        created_at: createdAt,
+      });
+      yield* db.call(UserSchema, "api.user_create", {
+        id: seed + 11,
+        email: `combined-created-decoy-${seed}@example.com`,
+        name: "Combined created decoy",
+        age,
+        created_at: createdAt + 1,
+      });
+
+      let cursor: string | null = null;
+      const seenIds: number[] = [];
+      do {
+        const page: UserCursorPage = yield* db.call(
+          UserCursorPageSchema,
+          "api.users_page",
+          cursor,
+          2,
+          age,
+          createdAt,
+        );
+        expect(page.items.every(
+          (user) => user.age === age && user.created_at === createdAt,
+        )).toBe(true);
+        expect(page.totalPage).toBeNull();
+        seenIds.push(...page.items.map((user) => user.id));
+        cursor = page.next_cursor;
+        if (cursor !== null) {
+          expect(cursor).toMatch(
+            new RegExp(`^uac1:${age}:${createdAt}:\\d+:\\d+$`),
+          );
+        }
+      } while (cursor !== null);
+
+      expect(seenIds).toEqual(expectedIds);
     }),
   ));
 

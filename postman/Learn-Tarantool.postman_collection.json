@@ -9,7 +9,8 @@
     {"key": "baseUrl", "value": "http://localhost:3000", "type": "string"},
     {"key": "pageLimit", "value": "2", "type": "string"},
     {"key": "nextCursor", "value": "", "type": "string"},
-    {"key": "lastCursor", "value": "", "type": "string"},
+    {"key": "filterAge", "value": "21", "type": "string"},
+    {"key": "filterCreatedAt", "value": "0", "type": "string"},
     {"key": "authEmail", "value": "", "type": "string"},
     {"key": "authPassword", "value": "secure-password-123", "type": "string"},
     {"key": "verificationToken", "value": "paste-token-from-email", "type": "string"},
@@ -64,15 +65,22 @@
               "path": ["api", "users"],
               "query": [{"key": "limit", "value": "{{pageLimit}}"}]
             },
-            "description": "Starts cursor pagination. The test saves next_cursor as nextCursor."
+            "description": "Starts deterministic pagination ordered by immutable [created_at, id]. Treat next_cursor as opaque; the test validates its boundary and saves it as nextCursor."
           },
           "event": [{"listen": "test", "script": {"exec": [
             "pm.test('status is 200', () => pm.response.to.have.status(200));",
             "const page = pm.response.json().data;",
-            "pm.test('response contains complete user objects', () => { pm.expect(page.items).to.be.an('array'); if (page.items.length > 0) pm.expect(page.items[0]).to.include.keys('id', 'email', 'name', 'age'); });",
-            "pm.test('pagination metadata is present', () => pm.expect(page).to.include.keys('totalPage', 'currentPage', 'lastCursor'));",
-            "pm.collectionVariables.set('nextCursor', page.next_cursor || '');",
-            "pm.collectionVariables.set('lastCursor', page.lastCursor || '');"
+            "pm.test('response contains complete user objects', () => { pm.expect(page.items).to.be.an('array'); if (page.items.length > 0) pm.expect(page.items[0]).to.include.keys('id', 'email', 'name', 'age', 'created_at'); });",
+            "pm.test('pagination metadata is present', () => pm.expect(page).to.include.keys('next_cursor', 'has_more', 'totalPage', 'currentPage'));",
+            "pm.test('next cursor matches the final [created_at, id] boundary', () => {",
+            "  if (page.next_cursor === null) return;",
+            "  pm.expect(page.items.length).to.be.greaterThan(0);",
+            "  pm.expect(page.next_cursor).to.match(/^u1:\\d+:\\d+:\\d+$/);",
+            "  const [, createdAt, id] = page.next_cursor.split(':').map(Number);",
+            "  const last = page.items[page.items.length - 1];",
+            "  pm.expect([createdAt, id]).to.eql([last.created_at, last.id]);",
+            "});",
+            "pm.collectionVariables.set('nextCursor', page.next_cursor || '');"
           ]}}]
         },
         {
@@ -90,13 +98,125 @@
                 {"key": "cursor", "value": "{{nextCursor}}"}
               ]
             },
-            "description": "Uses the logical ID cursor saved by the first-page request."
+            "description": "Uses the opaque cursor saved by the first-page request. The cursor represents the immutable logical [created_at, id] boundary, so users created in the same second continue by primary ID without skips or duplicates."
           },
           "event": [{"listen": "test", "script": {"exec": [
             "pm.test('status is 200', () => pm.response.to.have.status(200));",
+            "const requestCursor = pm.collectionVariables.get('nextCursor');",
             "const page = pm.response.json().data;",
-            "pm.collectionVariables.set('nextCursor', page.next_cursor || '');",
-            "pm.collectionVariables.set('lastCursor', page.lastCursor || '');"
+            "pm.test('request used a [created_at, id] cursor', () => pm.expect(requestCursor).to.match(/^u1:\\d+:\\d+:\\d+$/));",
+            "pm.test('items are strictly after the requested composite boundary', () => {",
+            "  const [, boundaryCreatedAt, boundaryId] = requestCursor.split(':').map(Number);",
+            "  for (const item of page.items) {",
+            "    pm.expect(item.created_at > boundaryCreatedAt || (item.created_at === boundaryCreatedAt && item.id > boundaryId)).to.eql(true);",
+            "  }",
+            "  for (let index = 1; index < page.items.length; index += 1) {",
+            "    const previous = page.items[index - 1];",
+            "    const current = page.items[index];",
+            "    pm.expect(current.created_at > previous.created_at || (current.created_at === previous.created_at && current.id > previous.id)).to.eql(true);",
+            "  }",
+            "});",
+            "pm.test('next cursor matches the final [created_at, id] boundary', () => {",
+            "  if (page.next_cursor === null) return;",
+            "  pm.expect(page.items.length).to.be.greaterThan(0);",
+            "  pm.expect(page.next_cursor).to.match(/^u1:\\d+:\\d+:\\d+$/);",
+            "  const [, createdAt, id] = page.next_cursor.split(':').map(Number);",
+            "  const last = page.items[page.items.length - 1];",
+            "  pm.expect([createdAt, id]).to.eql([last.created_at, last.id]);",
+            "});",
+            "pm.collectionVariables.set('nextCursor', page.next_cursor || '');"
+          ]}}]
+        },
+        {
+          "name": "Filter Users by Age",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "auth": {"type": "bearer", "bearer": [{"key": "token", "value": "{{sessionToken}}", "type": "string"}]},
+            "url": {
+              "raw": "{{baseUrl}}/api/users?age={{filterAge}}&limit={{pageLimit}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "users"],
+              "query": [
+                {"key": "age", "value": "{{filterAge}}"},
+                {"key": "limit", "value": "{{pageLimit}}"}
+              ]
+            },
+            "description": "Uses the same list endpoint to match an exact age. Results are ordered by [age, id], and any returned cursor is bound to the filter."
+          },
+          "event": [{"listen": "test", "script": {"exec": [
+            "pm.test('status is 200', () => pm.response.to.have.status(200));",
+            "const filterAge = Number(pm.variables.get('filterAge'));",
+            "const page = pm.response.json().data;",
+            "pm.test('all users satisfy the exact age filter', () => { for (const item of page.items) pm.expect(item.age).to.eql(filterAge); });",
+            "pm.test('filtered pagination does not run an exact count', () => pm.expect(page.totalPage).to.eql(null));",
+            "pm.test('age cursor matches the filter and final ID boundary', () => {",
+            "  if (page.next_cursor === null) return;",
+            "  pm.expect(page.next_cursor).to.match(/^ua1:\\d+:\\d+:\\d+$/);",
+            "  const [, cursorAge, id] = page.next_cursor.split(':').map(Number);",
+            "  const last = page.items[page.items.length - 1];",
+            "  pm.expect([cursorAge, id]).to.eql([filterAge, last.id]);",
+            "});"
+          ]}}]
+        },
+        {
+          "name": "Filter Users by Created At",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "auth": {"type": "bearer", "bearer": [{"key": "token", "value": "{{sessionToken}}", "type": "string"}]},
+            "url": {
+              "raw": "{{baseUrl}}/api/users?createdAt={{filterCreatedAt}}&limit={{pageLimit}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "users"],
+              "query": [
+                {"key": "createdAt", "value": "{{filterCreatedAt}}"},
+                {"key": "limit", "value": "{{pageLimit}}"}
+              ]
+            },
+            "description": "Uses the same list endpoint to match an exact Unix created_at timestamp. Set filterCreatedAt to a value present in the users space."
+          },
+          "event": [{"listen": "test", "script": {"exec": [
+            "pm.test('status is 200', () => pm.response.to.have.status(200));",
+            "const filterCreatedAt = Number(pm.variables.get('filterCreatedAt'));",
+            "const page = pm.response.json().data;",
+            "pm.test('all users satisfy the createdAt filter', () => { for (const item of page.items) pm.expect(item.created_at).to.eql(filterCreatedAt); });",
+            "pm.test('filtered pagination does not run an exact count', () => pm.expect(page.totalPage).to.eql(null));"
+          ]}}]
+        },
+        {
+          "name": "Filter Users by Age and Created At",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "auth": {"type": "bearer", "bearer": [{"key": "token", "value": "{{sessionToken}}", "type": "string"}]},
+            "url": {
+              "raw": "{{baseUrl}}/api/users?age={{filterAge}}&createdAt={{filterCreatedAt}}&limit={{pageLimit}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "users"],
+              "query": [
+                {"key": "age", "value": "{{filterAge}}"},
+                {"key": "createdAt", "value": "{{filterCreatedAt}}"},
+                {"key": "limit", "value": "{{pageLimit}}"}
+              ]
+            },
+            "description": "Combines both exact filters using the [age, created_at, id] index."
+          },
+          "event": [{"listen": "test", "script": {"exec": [
+            "pm.test('status is 200', () => pm.response.to.have.status(200));",
+            "const filterAge = Number(pm.variables.get('filterAge'));",
+            "const filterCreatedAt = Number(pm.variables.get('filterCreatedAt'));",
+            "const page = pm.response.json().data;",
+            "pm.test('all users satisfy both filters', () => {",
+            "  for (const item of page.items) pm.expect([item.age, item.created_at]).to.eql([filterAge, filterCreatedAt]);",
+            "});",
+            "pm.test('filtered pagination does not run an exact count', () => pm.expect(page.totalPage).to.eql(null));",
+            "pm.test('combined cursor is bound to both filters', () => {",
+            "  if (page.next_cursor === null) return;",
+            "  pm.expect(page.next_cursor).to.match(/^uac1:\\d+:\\d+:\\d+:\\d+$/);",
+            "  const [, cursorAge, cursorCreatedAt] = page.next_cursor.split(':').map(Number);",
+            "  pm.expect([cursorAge, cursorCreatedAt]).to.eql([filterAge, filterCreatedAt]);",
+            "});"
           ]}}]
         }
       ]
